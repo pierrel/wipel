@@ -1,0 +1,7 @@
+; -*- mode: emacs-lisp; lexical-binding: t; no-byte-compile: t -*-
+
+(eldev-use-package-archive 'gnu-elpa)
+(eldev-use-package-archive 'melpa)
+
+;; Byte-compilation warnings are errors in CI-style runs.
+(setf eldev-build-treat-warnings-as-errors t)

@@ -1,0 +1,135 @@
+#+title: wip.el
+
+* Problems
+
+I find it difficult to focus on work and quickly find related work in progress content/programs/systems.
+
+The mental model of the various things I need to be efficient on what I'm working on isn't supported by emacs.
+
+It isn't efficient to manage a global list of buffers when I'm trying to do something that only requires a few of them.
+
+It's difficult to put a name to something (an idea, a piece of content,  etc) when I don't yet know what it is (or how it relates to something existing, named). I want to take some notes related to work in progress without having to come up with a name for the /thing/ I want to put it into.
+
+I often have ideas about things unrelated to what I'm working on and need to put them somewhere quickly so I don't forget. This is supported well by org-capture, but not scoped to the current project.
+
+There is no durable trace of what I've worked on in the past.
+
+[exwm-specific] I can't easily manage browser tabs between tasks
+* Solution
+Provides functions to promote more focused work in emacs.
+
+When I'm working on a focused project, I want to:
+- Only see the buffers for that project (and have these buffers managed for me)
+- [tentative] Only see the kill ring scoped to the current work
+- Park things that aren't ready to be put anywhere (sort of like *scratch* but for work)
+- See a history of the focsued work I've been doing both within and across projects, including:
+  - Files and buffers changed
+  - Machines I've engaged with (ssh'd to)
+  - Commands I've run (either in terminals or through subprocess commands)
+- [exwm-specific, may be better for another project] Manage firefox through windows (mapped to buffers) comprised of tabs of related work
+
+Why vanilla emacs doesn't work:
+- Buffer selection is global by default, so you see everything even when you need to focus on one thing
+- Tabs (C-x t) provide groupings of windows (which is GREAT) but global buffers/files
+- Projects (C-x p) provide directory-level scope, but often I want to scope my work to file-less buffers
+* Terms
+- *wip* - The work being done right now and all of the content, programs, and systems related to it. The rest of the terms can be scoped to "wip" so as not to collide with the emacs-native terms.
+- *buffers* - The buffers that contain the work being done. This includes (but is not limited to) the files being accessed by those buffers and (maybe?) the projects associated with those files. Buffers can belong to multiple wip.
+- *view* - A graphical view of the work I'm doing. For example, sometimes I just need a full-screen browser. Sometimes I want a "control center" that shows a lot more high-level view. Sometimes I'm minutely focused on a few files/buffers.
+- *control* - (need to find a better name) A high-level overview of the wip buffers. Can probably be a filtered ibuffer buffer.
+- *overview* - A summary of all wip and some way to understanding what's going on there and what has gone on before.
+* Stories
+I want to start a new, distinct set of work (tenative) with a scoped goal. Maybe related to a specific org item.
+
+I want to select or open multiple buffers related to the work.
+
+I want to select a buffer related to the work and by that "bring it in" to the current work.
+
+I want to "evict" a buffer from the current work. Evicting only removes the buffer from the wip; even if it then belongs to no work at all, it is not killed globally.
+
+I want to capture an idea or paste some content into a space specific to the work without having to think about where. I want to be able to see all of my captured content in one place and manipulate it like a regular buffer/file.
+
+I want to close all buffers related only to the current work in progress.
+
+I want to start a new, fresh wip even when I haven't completed the current work.
+
+I want to look back at what I've done in this session both in terms of the current wip and all wip, current session and past.
+
+I want to see content related to work in different ways/orientations and save/come back to them.
+
+I want to see an overview of all my distinct wip with some information about what's going on in there now.
+
+If my computer dies or I'm interrupted, I want to be able to recreate all of my wip.
+
+I want to call a piece of work "done" at least in terms of the current session. I want to be able to pick that back up at a later time.
+
+I don't want to learn a bunch of new keystrokes or have to prefix my known keystrokes.
+
+I want to be able to "leave" all wip so that I can get back to the global context and normal emacs.
+
+I want to be able to scope my buffer and file selection to projects of the current work, even if outside of the current buffer.
+
+(configurable) I want to open one firefox instance/window related to the current wip. NOTE: this is exwm-specific.
+
+(configurable) I want to open a terminal within the context of the current work.
+
+I want to run a subcommand (async or sync, default async) within the context of the current work.
+* Interface
+wip is *modal* meaning that you are either in a wip or not. Once you are in a wip, common commands work /within the context of the wip/. The main work of wip is to group buffers and tabs into filtered state so that you can focus.
+** Work management
+=C-c w m= calls =wip= is the main command and it can be called with . It will show you your active wips (if any) as ido completions as well as the ability to type a new wip name for a fresh wip.
+
+=C-c w q= calls =wip-exit= takes you out of the wip and returns all keybindings to their previous settings. Active wips are not killed if you exit wip mode.
+
+=C-c w k= calls =wip-kill=, which shows you the same set of active wips which, once selected kill that wip.
+** Buffer management
+All of these assume you are in a wip.
+
+=C-x b= calls =wip-ido-switch-buffer=, which shows =ido-switch-buffer=, but filtered to only the buffers in the wip. Calling it with the prefix command shows the same as =ido-switch-buffer= but not filtered (shows you all buffers). Once a buffer outside of a wip is selected, it becomes part of the wip.
+
+=C-x k= calls =wip-ido-kill-buffer=, which shows =ido-kill-buffer= buffers, filtered to the current wip. When a buffer is selected, it is removed from the wip (not killed in the global buffer state).
+
+=C-c w b= shows ibuffer filtered to just those buffers in the current wip. You can further filter while in this filtered ibuffer. Killing a buffer from this special ibuffer mode only removes it from the wip.
+
+Any buffer created while in a wip is added to the wip. This includes files opened, unfile'd buffers, info pages, async commands, etc.
+** Window management
+When moving between wips, the previously-selected wip maintains its buffer's window states so that revisiting a previous wip resurfaces the window configuration as it was before the switch.
+*** Tab-bar
+wips also contain their own set of tabs, which are also maintained across switches. All of the common tab-bar commands work in the context of the current wip. The tab bar is populated with only the current set of tabs that belong to the wip.
+
+=C-x t <return>= allows you to select a tab that belongs to the wip.
+
+=C-x t 2= creates a new tab and associates it to the current wip.
+
+=C-x t 0= removes the current tab.
+
+=C-x t r= renames the current tab.
+
+NOTE: this section is left without specific function names to see if we could re-use the existing tab-bar-* functions in some way to increase code sharing.
+*** Winner
+=C-c <right>= and =C-c <left>= work as expected within the context of the current wip. It does not switch window configurations between wips or between wips themselves.
+
+NOTE: this section is left without specific function names as I explore whether it's possible to re-used the existing winner-* functions to these end and reduce overhead.
+** The scratchpad
+=C-c w p= calls =wip-pad=, which either creates or displays (with =display-buffer=) the wip "scratchpad". This scratchpad is stored to a local file in the wip project space for later recovery (in case of crashes, and for desktop recovery). The pad is local to the current wip and is called =*pad*= by default. If the pad is renamed or saved to a file, then subsequent uses of =wip-pad= will create a new scratchpad.
+
+=wip-scratchpad-modes= is a list of modes that the scratchpad automatically inherits when opened. By default the only mode is org-mode.
+** Firefox integration
+This is only available if your emacs can natively, like exwm.
+
+=C-c w f= calls =wip-firefox= and displays a wip-local firefox buffer. It either creates it or displays it if it already exists.
+** Overview :future:
+=C-c w o= displays a buffer that contains all active wips, their tabs (if any) and a short representation of their content like so:
+#+begin_example
+* [wip name]
+** [tab name]
+- [buffer 1 name] - [mode] - [First 10 characters of the buffer]
+- [buffer 2 name] - [mode] - [First 10 characters of the buffer]
+- [buffer 3 name] - [mode] - [First 10 characters of the buffer]
+- [buffer 4 name] - [mode] - [First 10 characters of the buffer]
+- [buffer 5 name] - [mode] - [First 10 characters of the buffer]
+#+end_example
+
+The wip names and tabs are selectable. Once selected it selects the wip for you.
+** History :future:
+Need to think about this more.
