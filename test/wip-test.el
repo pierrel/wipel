@@ -7,6 +7,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'dired)
 (require 'wip)
 
 (defmacro wip-test--fixture (&rest body)
@@ -18,6 +19,8 @@
          (wip--known-buffers (make-hash-table :test #'eq :weakness 'key))
          (wip--global-window-config nil)
          (wip--global-tabs nil)
+         (switch-to-prev-buffer-skip switch-to-prev-buffer-skip)
+         (wip--saved-prev-buffer-skip nil)
          (wip-test--initial-buffers (buffer-list)))
      (unwind-protect
          (progn ,@body)
@@ -62,6 +65,9 @@
       (should-not (memq buffer (wip--wip-buffers wip--current))))))
 
 (ert-deftest wip-test-preexisting-buffer-not-added ()
+  "A pre-existing buffer that is never displayed is not adopted at wip entry.
+A displayed pre-existing buffer IS adopted; see
+`wip-test-selected-preexisting-buffer-joins-wip'."
   (wip-test--fixture
     (let ((buffer (generate-new-buffer "wip-test-preexisting")))
       (wip "alpha")
@@ -77,6 +83,122 @@
         (should-not (memq in-alpha (wip--wip-buffers (wip-test--wip "beta"))))
         (should (memq in-alpha (wip--wip-buffers (wip-test--wip "alpha"))))))))
 
+(ert-deftest wip-test-dired-fresh-buffer-joins-wip ()
+  "A dired buffer created from within a wip joins the wip.
+The buffer is genuinely new, so creation tracking picks it up
+directly, independent of selection adoption."
+  (wip-test--fixture
+    (wip "alpha")
+    (dired temporary-file-directory)
+    (should (eq major-mode 'dired-mode))
+    (should (memq (current-buffer) (wip--wip-buffers wip--current)))))
+
+(ert-deftest wip-test-dired-reused-buffer-joins-wip ()
+  "Opening dired from within a wip adds its buffer even when reused.
+When the directory was already visited before entering the wip,
+`dired' reuses that pre-existing buffer instead of creating one.
+The user still \"opened dired from within the wip\", so the
+display-adoption rule brings the reused buffer into the wip."
+  (wip-test--fixture
+    ;; Visit the directory once, outside any wip.
+    (let ((buffer (dired-noselect temporary-file-directory)))
+      (wip "alpha")
+      (dired temporary-file-directory)
+      ;; dired reused the pre-existing buffer rather than creating one.
+      (should (eq (current-buffer) buffer))
+      (should (memq buffer (wip--wip-buffers wip--current))))))
+
+(ert-deftest wip-test-find-file-fresh-buffer-joins-wip ()
+  "A file buffer freshly created from within a wip joins the wip.
+Contrast case for `wip-test-find-file-reused-buffer-joins-wip': the
+buffer is genuinely new, so creation tracking picks it up directly."
+  (wip-test--fixture
+    (let ((file (make-temp-file "wip-test-file-")))
+      (unwind-protect
+          (progn
+            (wip "alpha")
+            (find-file file)
+            (should (memq (current-buffer)
+                          (wip--wip-buffers wip--current))))
+        (delete-file file)))))
+
+(ert-deftest wip-test-find-file-reused-buffer-joins-wip ()
+  "Opening a file from within a wip adds its buffer even when reused.
+When the file was already visited before entering the wip, `find-file'
+reuses the pre-existing buffer instead of creating one, so creation
+tracking never sees it; the display-adoption rule brings it in
+instead.  (Regression: previously such a buffer was absent from
+`C-x b' entirely.)"
+  (wip-test--fixture
+    (let ((file (make-temp-file "wip-test-file-")))
+      (unwind-protect
+          ;; Visit the file once, outside any wip.
+          (let ((buffer (find-file-noselect file)))
+            (wip "alpha")
+            (find-file file)
+            ;; find-file reused the pre-existing buffer.
+            (should (eq (current-buffer) buffer))
+            (should (memq buffer (wip--wip-buffers wip--current))))
+        (delete-file file)))))
+
+(ert-deftest wip-test-selected-preexisting-buffer-joins-wip ()
+  "A pre-existing buffer selected while in a wip joins the wip.
+User scenario: the vterm buffer you are working in existed before the
+wip; being in it makes it part of the wip via the display-adoption
+rule, so `C-x b' from the next buffer offers it."
+  (wip-test--fixture
+    (let ((term (generate-new-buffer "wip-test-term")))
+      (wip "alpha")
+      (switch-to-buffer term)
+      (should (eq (current-buffer) term))
+      (should (memq term (wip--wip-buffers wip--current))))))
+
+(ert-deftest wip-test-switch-buffer-offers-previous-buffer-first ()
+  "`wip-ido-switch-buffer' offers candidates in most-recently-used order.
+Like `ido-switch-buffer', the buffer you were just in is the first
+(default) candidate, even when other wip buffers were created more
+recently."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((prev (generate-new-buffer "wip-test-prev")))
+      ;; Two buffers created after PREV, so PREV is not the newest.
+      (generate-new-buffer "wip-test-mid1")
+      (generate-new-buffer "wip-test-mid2")
+      ;; Work in PREV, then open a new buffer from there.
+      (switch-to-buffer prev)
+      (switch-to-buffer (generate-new-buffer "wip-test-new"))
+      (let (captured)
+        (let ((stub (lambda (_prompt choices &rest _)
+                      (setq captured choices)
+                      (car choices))))
+          (advice-add 'ido-completing-read :override stub)
+          (unwind-protect
+              (wip-ido-switch-buffer)
+            (advice-remove 'ido-completing-read stub)))
+        ;; The previously used buffer must be the first candidate.
+        (should (equal (car captured) "wip-test-prev"))))))
+
+(ert-deftest wip-test-evict-removes-buffer-from-windows ()
+  "Evicting a displayed buffer removes it from the wip's windows.
+The buffer survives globally (eviction never kills), but the window
+showing it switches to something else, like `kill-buffer' does for
+windows."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (generate-new-buffer "wip-test-evictee")))
+      (switch-to-buffer buffer)
+      (should (eq (window-buffer) buffer))
+      (let ((stub (lambda (&rest _) (buffer-name buffer))))
+        (advice-add 'ido-completing-read :override stub)
+        (unwind-protect
+            (wip-ido-kill-buffer)
+          (advice-remove 'ido-completing-read stub)))
+      ;; Evicted and still alive...
+      (should-not (memq buffer (wip--wip-buffers wip--current)))
+      (should (buffer-live-p buffer))
+      ;; ...but no longer shown in any window.
+      (should-not (get-buffer-window buffer)))))
+
 (ert-deftest wip-test-evict-keeps-buffer-alive ()
   (wip-test--fixture
     (wip "alpha")
@@ -91,9 +213,167 @@
     (let ((buffer (generate-new-buffer "wip-test-evictee")))
       (wip--remove-buffer buffer wip--current)
       ;; Creating another buffer re-runs the tracking scan; the
-      ;; evicted buffer is already known and must not come back.
+      ;; evicted buffer is already known (defeating creation
+      ;; tracking) and not shown in any window, so it must not come
+      ;; back.  (Even when displayed, eviction is sticky; see
+      ;; `wip-test-evicted-buffer-not-readopted-when-redisplayed'.)
       (generate-new-buffer "wip-test-other")
       (should-not (memq buffer (wip--wip-buffers wip--current))))))
+
+(ert-deftest wip-test-displayed-in-other-window-joins-wip ()
+  "Any buffer displayed in one of the wip's windows joins the wip.
+The membership rule is generic — display in any window counts, not
+just selection in the selected window."
+  (wip-test--fixture
+    (let ((popup (generate-new-buffer "wip-test-popup")))
+      (wip "alpha")
+      (display-buffer popup)
+      (generate-new-buffer "wip-test-event")
+      (should (memq popup (wip--wip-buffers wip--current))))))
+
+(ert-deftest wip-test-kill-wip-spares-adopted-buffers ()
+  "`wip-kill' never kills buffers merely adopted from outside.
+Only buffers the wip created (owns) are candidates for the
+exclusive-buffer sweep."
+  (wip-test--fixture
+    (let ((adopted (generate-new-buffer "wip-test-adopted")))
+      (wip "alpha")
+      (switch-to-buffer adopted)
+      (should (memq adopted (wip--wip-buffers wip--current)))
+      (wip-kill "alpha")
+      (should (buffer-live-p adopted)))))
+
+(ert-deftest wip-test-empty-wip-restore-lands-on-pad ()
+  "Restoring a wip whose members all died lands on a fresh pad.
+The dead-buffer substitute Emacs picks (possibly another wip's pad)
+must not stay in the window nor join the wip."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((alpha-pad (wip--get-pad wip--current)))
+      (wip "beta")
+      (let ((beta-pad (wip--get-pad wip--current)))
+        (kill-buffer alpha-pad)
+        (wip "alpha")
+        (generate-new-buffer "wip-test-event")
+        (should (memq (window-buffer) (wip--wip-buffers wip--current)))
+        (should-not (memq beta-pad (wip--wip-buffers wip--current)))))))
+
+(ert-deftest wip-test-evict-sole-member-lands-on-pad ()
+  "Evicting the only remaining member gives the window a fresh pad."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((pad (wip--get-pad wip--current))
+          (member (generate-new-buffer "wip-test-member")))
+      (switch-to-buffer member)
+      (kill-buffer pad)
+      (wip--evict-buffer member wip--current)
+      (should (memq (window-buffer) (wip--wip-buffers wip--current)))
+      (should-not (eq (window-buffer) member)))))
+
+(ert-deftest wip-test-kill-sole-member-adopts-fallback ()
+  "Killing the last wip buffer adopts whatever Emacs shows next.
+Membership is generic: the buffer now displayed joined by being
+displayed.  It was not created in the wip, so `wip-kill' will not
+kill it (see `wip-test-kill-wip-spares-adopted-buffers')."
+  (wip-test--fixture
+    (let ((global (generate-new-buffer "wip-test-global")))
+      (switch-to-buffer global)
+      (wip "alpha")
+      (let ((pad (wip--get-pad wip--current)))
+        (kill-buffer pad)
+        (generate-new-buffer "wip-test-event")
+        (should (memq (window-buffer) (wip--wip-buffers wip--current)))))))
+
+(ert-deftest wip-test-pad-created-for-noncurrent-wip-is-owned-by-it ()
+  "A pad created for a non-current wip belongs to that wip alone.
+Reachable via a wip ibuffer that outlives its wip being current: the
+pad must be registered with and owned by its own wip, not adopted or
+owned by whichever wip happens to be current."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((alpha wip--current))
+      (wip "beta")
+      (kill-buffer (wip--wip-pad-buffer alpha))
+      (let ((pad (wip--get-pad alpha)))
+        (generate-new-buffer "wip-test-event")
+        (should (memq pad (wip--wip-buffers alpha)))
+        (should (memq pad (wip--wip-created alpha)))
+        (should-not (memq pad (wip--wip-buffers wip--current)))
+        (should-not (memq pad (wip--wip-created wip--current)))))))
+
+(ert-deftest wip-test-kill-fallback-stays-in-wip ()
+  "Killing a displayed wip buffer must not pull outside buffers in.
+Emacs picks a fallback for the window; `wip--prev-buffer-skip-p'
+steers it to a wip member, and the pre-wip buffer in the window's
+history must not be adopted."
+  (wip-test--fixture
+    (let ((global (generate-new-buffer "wip-test-global")))
+      (switch-to-buffer global)         ; in window history, pre-wip
+      (wip "alpha")
+      (let ((member (generate-new-buffer "wip-test-member")))
+        (switch-to-buffer member)
+        (kill-buffer member)
+        (should (memq (window-buffer) (wip--wip-buffers wip--current)))
+        ;; A later, unrelated buffer-list event must not adopt the
+        ;; pre-wip buffer either.
+        (generate-new-buffer "wip-test-event")
+        (should-not (memq global (wip--wip-buffers wip--current)))))))
+
+(ert-deftest wip-test-evict-fallback-stays-in-wip ()
+  "Evicting a displayed wip buffer must not pull outside buffers in.
+Same as `wip-test-kill-fallback-stays-in-wip' but through eviction."
+  (wip-test--fixture
+    (let ((global (generate-new-buffer "wip-test-global")))
+      (switch-to-buffer global)
+      (wip "alpha")
+      (let ((member (generate-new-buffer "wip-test-member")))
+        (switch-to-buffer member)
+        (wip--evict-buffer member wip--current)
+        (should (memq (window-buffer) (wip--wip-buffers wip--current)))
+        (generate-new-buffer "wip-test-event")
+        (should-not (memq global (wip--wip-buffers wip--current)))))))
+
+(ert-deftest wip-test-evicted-buffer-not-readopted-when-redisplayed ()
+  "Eviction is sticky: redisplaying an evicted buffer does not re-add it.
+A restored tab's window configuration (or any other mechanism) can
+put an evicted buffer back on screen; that must not silently undo
+the eviction."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (generate-new-buffer "wip-test-evictee")))
+      (wip--evict-buffer buffer wip--current)
+      (switch-to-buffer buffer)
+      (generate-new-buffer "wip-test-event")
+      (should-not (memq buffer (wip--wip-buffers wip--current))))))
+
+(ert-deftest wip-test-explicit-add-unblocks-evicted-buffer ()
+  "An explicit add (as C-u C-x b does) brings back an evicted buffer."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (generate-new-buffer "wip-test-evictee")))
+      (wip--evict-buffer buffer wip--current)
+      (wip--add-buffer buffer wip--current)
+      (should (memq buffer (wip--wip-buffers wip--current)))
+      ;; And selection adoption works for it again afterwards.
+      (should-not (memq buffer (wip--wip-evicted wip--current))))))
+
+(ert-deftest wip-test-switch-substitute-not-adopted ()
+  "A buffer substituted into a restored wip config is not adopted.
+If the saved selected window's buffer died while another wip was
+current, `set-window-configuration' substitutes some live buffer
+\(possibly another wip's pad); the restore must switch to a member
+instead, and the substitute must not join the wip."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((doomed (generate-new-buffer "wip-test-doomed")))
+      (switch-to-buffer doomed)
+      (wip "beta")
+      (let ((beta-pad (wip--get-pad wip--current)))
+        (kill-buffer doomed)
+        (wip "alpha")
+        (should (memq (window-buffer) (wip--wip-buffers wip--current)))
+        (generate-new-buffer "wip-test-event")
+        (should-not (memq beta-pad (wip--wip-buffers wip--current)))))))
 
 (ert-deftest wip-test-kill-wip-kills-exclusive-buffers ()
   (wip-test--fixture

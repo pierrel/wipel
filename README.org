@@ -81,17 +81,17 @@ wip is *modal* meaning that you are either in a wip or not. Once you are in a wi
 
 =C-c w q= calls =wip-exit= takes you out of the wip and returns all keybindings to their previous settings. Active wips are not killed if you exit wip mode.
 
-=C-c w k= calls =wip-kill=, which shows you the same set of active wips which, once selected kill that wip.
+=C-c w k= calls =wip-kill=, which shows you the same set of active wips which, once selected kill that wip. Killing a wip closes the buffers it created (owns) that belong to no other wip; buffers merely adopted from outside stay open.
 ** Buffer management
 All of these assume you are in a wip.
 
 =C-x b= calls =wip-ido-switch-buffer=, which shows =ido-switch-buffer=, but filtered to only the buffers in the wip. Calling it with the prefix command shows the same as =ido-switch-buffer= but not filtered (shows you all buffers). Once a buffer outside of a wip is selected, it becomes part of the wip.
 
-=C-x k= calls =wip-ido-kill-buffer=, which shows =ido-kill-buffer= buffers, filtered to the current wip. When a buffer is selected, it is removed from the wip (not killed in the global buffer state).
+=C-x k= calls =wip-ido-kill-buffer=, which shows =ido-kill-buffer= buffers, filtered to the current wip. When a buffer is selected, it is removed from the wip (not killed in the global buffer state), and windows showing it switch to another buffer as if it had been killed. Eviction is sticky: the buffer does not rejoin the wip just by being displayed again — bring it back explicitly with =C-u C-x b=.
 
-=C-c w b= shows ibuffer filtered to just those buffers in the current wip. You can further filter while in this filtered ibuffer. Killing a buffer from this special ibuffer mode only removes it from the wip.
+=C-c w b= shows ibuffer filtered to just those buffers in the current wip. You can further filter while in this filtered ibuffer. Killing a buffer from this special ibuffer mode only removes it from the wip; as with =C-x k=, windows showing it switch to another buffer.
 
-Any buffer created while in a wip is added to the wip. This includes files opened, unfile'd buffers, info pages, async commands, etc.
+Membership is one generic rule: any buffer created while in a wip is added to the wip, and so is any buffer displayed in one of its windows — created, reused (=find-file=, =dired=), selected, or popped up. This includes files opened, unfile'd buffers, info pages, async commands, etc. The only exceptions are internal (space-prefixed) buffers and evicted buffers. Buffers /created/ in the wip are owned by it; adopted pre-existing buffers are only borrowed.
 ** Window management
 When moving between wips, the previously-selected wip maintains its buffer's window states so that revisiting a previous wip resurfaces the window configuration as it was before the switch.
 *** Tab-bar
@@ -133,3 +133,5 @@ This is only available if your emacs can natively, like exwm.
 The wip names and tabs are selectable. Once selected it selects the wip for you.
 ** History :future:
 Need to think about this more.
+* Roadmap
+- Remove the =cl-lib= dependency entirely (currently only =cl-defstruct= in =wip.el=); use =seq= and core equivalents instead. No new =cl-lib= uses in the meantime.

@@ -17,13 +17,20 @@
 ;;
 ;; wip is modal: you are either in a wip or not.  While in a wip:
 ;;
-;; - Any buffer created (except internal, space-prefixed ones) is
-;;   automatically added to the wip.
+;; - Membership is one generic rule: any buffer created while the
+;;   wip is current joins the wip, and so does any buffer displayed
+;;   in one of its windows — created, reused (`find-file', `dired'),
+;;   selected, or popped up.  Only internal (space-prefixed) buffers
+;;   and evicted buffers are excepted.  Buffers *created* in the wip
+;;   are owned by it: `wip-kill' kills owned buffers that belong to
+;;   no other wip, and never buffers merely adopted from outside.
 ;; - `C-x b' (`wip-ido-switch-buffer') is filtered to the wip's
 ;;   buffers; with a prefix argument it shows all buffers, and a
 ;;   buffer selected that way is brought into the wip.
 ;; - `C-x k' (`wip-ido-kill-buffer') evicts a buffer from the wip
-;;   without killing it globally.
+;;   without killing it globally.  Eviction is sticky: the buffer is
+;;   not re-adopted just by being displayed again; bring it back
+;;   with C-u C-x b.
 ;; - The window configuration and the frame's tab-bar tabs are saved
 ;;   when you switch away and restored when you come back.
 ;; - `wip-pad' gives you a per-wip scratchpad, persisted to a file
@@ -88,8 +95,11 @@ names (\"*pad*<2>\" and so on)."
   :type 'string)
 
 (defcustom wip-kill-exclusive-buffers t
-  "Non-nil means `wip-kill' kills buffers that belong to no other wip.
-Buffers shared with other wips are always left alone."
+  "Non-nil means `wip-kill' kills buffers the wip created and owns.
+Only buffers that were created while the wip was current and belong
+to no other wip are killed.  Buffers adopted from outside (merely
+displayed or selected while in the wip) and buffers shared with
+other wips are always left alone."
   :type 'boolean)
 
 (defcustom wip-firefox-command '("firefox" "--new-window")
@@ -100,9 +110,16 @@ Buffers shared with other wips are always left alone."
 
 (cl-defstruct (wip--wip (:constructor wip--wip-create)
                         (:copier nil))
-  "A single work-in-progress context."
+  "A single work-in-progress context.
+BUFFERS are the members; CREATED tracks the buffers created while
+this wip was current, whether or not they are still members (the
+wip \"owns\" those — `wip-kill' only ever kills owned buffers);
+EVICTED holds buffers explicitly evicted, which stay out until
+explicitly re-added."
   name
   (buffers nil)
+  (created nil)
+  (evicted nil)
   window-config
   tabs
   pad-buffer
@@ -125,6 +142,13 @@ Also used as the activation variable for `wip--session-map' in
 (defvar wip--known-buffers (make-hash-table :test #'eq :weakness 'key)
   "Set of buffers already seen, used to detect newly created buffers.")
 
+(defvar wip--inhibit-adoption nil
+  "Non-nil while a wip transition or an eviction is running.
+Suppresses display adoption in `wip--on-buffer-list-update' so that
+buffers momentarily on display during a transition are not pulled
+into the new wip, and so that a buffer being evicted is not
+re-adopted while windows still show it.")
+
 ;;;; Buffer bookkeeping
 
 (defun wip--trackable-buffer-p (buffer)
@@ -133,20 +157,57 @@ Internal buffers (whose names start with a space) are not tracked."
   (not (string-prefix-p " " (buffer-name buffer))))
 
 (defun wip--live-buffers (wip)
-  "Return the live buffers of WIP, pruning dead ones from its list."
+  "Return the live buffers of WIP, pruning dead ones from its lists."
+  (setf (wip--wip-created wip)
+        (seq-filter #'buffer-live-p (wip--wip-created wip)))
   (setf (wip--wip-buffers wip)
         (seq-filter #'buffer-live-p (wip--wip-buffers wip))))
 
 (defun wip--add-buffer (buffer wip)
-  "Add BUFFER to WIP unless it is already a member or dead."
-  (when (and (buffer-live-p buffer)
-             (not (memq buffer (wip--wip-buffers wip))))
-    (push buffer (wip--wip-buffers wip))))
+  "Add BUFFER to WIP unless it is already a member or dead.
+Adding also clears BUFFER's evicted status, so an explicit add
+brings back a previously evicted buffer."
+  (when (buffer-live-p buffer)
+    (setf (wip--wip-evicted wip) (delq buffer (wip--wip-evicted wip)))
+    (unless (memq buffer (wip--wip-buffers wip))
+      (push buffer (wip--wip-buffers wip)))))
 
 (defun wip--remove-buffer (buffer wip)
   "Remove BUFFER from WIP.  The buffer is not killed."
   (setf (wip--wip-buffers wip)
         (remq buffer (wip--wip-buffers wip))))
+
+(defun wip--evict-buffer (buffer wip)
+  "Evict BUFFER from WIP and remove it from any window showing it.
+The buffer is never killed; windows showing it switch to another wip
+buffer (see `wip--prev-buffer-skip-p'), as `kill-buffer' would
+arrange, falling back to the wip's pad when the wip has no other
+buffer to show (evicting the pad itself just removes it from the
+member list).  The buffer is remembered as evicted: merely being
+displayed again (say, by a restored tab) will not re-adopt it;
+\\[universal-argument] \\[wip-ido-switch-buffer] brings it back.
+Adoption is suppressed while the windows change."
+  (wip--remove-buffer buffer wip)
+  (setf (wip--wip-evicted wip)
+        (cons buffer (delq buffer (seq-filter #'buffer-live-p
+                                              (wip--wip-evicted wip)))))
+  (let ((wip--inhibit-adoption t))
+    (replace-buffer-in-windows buffer)
+    ;; If no other wip buffer existed to fall back on, windows may
+    ;; still show the evictee; give them the pad instead (unless the
+    ;; evictee IS the pad).
+    (when (get-buffer-window-list buffer nil t)
+      (let ((fallback (wip--get-pad wip)))
+        (unless (eq fallback buffer)
+          (dolist (window (get-buffer-window-list buffer nil t))
+            (set-window-buffer window fallback)))))))
+
+(defun wip--mru-buffers (wip)
+  "Return WIP's live buffers in most-recently-used order.
+Buffers that were never selected come last, in creation order."
+  (let ((buffers (wip--live-buffers wip)))
+    (seq-filter (lambda (buffer) (memq buffer buffers))
+                (buffer-list))))
 
 (defun wip--buffer-owners (buffer)
   "Return the wips that BUFFER belongs to, as a list of structs."
@@ -159,16 +220,47 @@ Internal buffers (whose names start with a space) are not tracked."
     (puthash buffer t wip--known-buffers)))
 
 (defun wip--on-buffer-list-update ()
-  "Add buffers created while in a wip to the current wip.
+  "Track buffers for the current wip.
 Installed on `buffer-list-update-hook' only while a wip is current.
-New buffers are those not yet in `wip--known-buffers'; buffers created
-with buffer hooks inhibited are picked up on the next run."
+Membership is deliberately generic — one rule, no per-command cases:
+any trackable buffer (name not starting with a space) that is
+CREATED while the wip is current joins the wip and is owned by it,
+and any trackable buffer DISPLAYED in one of the frame's windows
+joins the wip — however it got there (created, reused by
+`find-file' or `dired', popped up, or chosen by Emacs as a
+fallback).  The only exceptions: the wip's evicted buffers (see
+`wip--evict-buffer') stay out, and display adoption pauses during
+wip transitions and evictions (see `wip--inhibit-adoption').
+Buffers created with buffer hooks inhibited are picked up on the
+next run."
   (when wip--current
     (dolist (buffer (buffer-list))
       (unless (gethash buffer wip--known-buffers)
         (puthash buffer t wip--known-buffers)
         (when (wip--trackable-buffer-p buffer)
-          (wip--add-buffer buffer wip--current))))))
+          (wip--add-buffer buffer wip--current)
+          (push buffer (wip--wip-created wip--current)))))
+    (unless wip--inhibit-adoption
+      (dolist (window (window-list))
+        (let ((buffer (window-buffer window)))
+          (when (and (wip--trackable-buffer-p buffer)
+                     (not (memq buffer
+                                (wip--wip-evicted wip--current))))
+            (wip--add-buffer buffer wip--current)))))))
+
+(defvar wip--saved-prev-buffer-skip nil
+  "Value of `switch-to-prev-buffer-skip' before wip took it over.
+Saved by `wip--activate' and restored by `wip--deactivate'.")
+
+(defun wip--prev-buffer-skip-p (_window buffer _bury-or-kill)
+  "Return non-nil to skip BUFFER as a window fallback while in a wip.
+Installed as `switch-to-prev-buffer-skip' while the wip machinery is
+active, so that when a displayed buffer is killed or evicted the
+window falls back to a buffer of the current wip instead of pulling
+an outside buffer into view (which display adoption would then
+adopt)."
+  (and wip--current
+       (not (memq buffer (wip--wip-buffers wip--current)))))
 
 ;;;; Entering, leaving and killing wips
 
@@ -189,15 +281,21 @@ must name an active wip."
     (ido-completing-read prompt names nil (not allow-new))))
 
 (defun wip--activate ()
-  "Install the hooks that make the wip machinery live."
+  "Install the hooks that make the wip machinery live.
+Also takes over `switch-to-prev-buffer-skip' (a user customization
+of that variable is shelved while in a wip and restored on exit)."
   (add-hook 'buffer-list-update-hook #'wip--on-buffer-list-update)
-  (add-hook 'kill-emacs-hook #'wip--persist-all-pads))
+  (add-hook 'kill-emacs-hook #'wip--persist-all-pads)
+  (setq wip--saved-prev-buffer-skip switch-to-prev-buffer-skip
+        switch-to-prev-buffer-skip #'wip--prev-buffer-skip-p))
 
 (defun wip--deactivate ()
   "Remove the buffer-tracking hook installed by `wip--activate'.
-The `kill-emacs-hook' entry stays so scratchpads of inactive wips are
-still persisted on exit."
-  (remove-hook 'buffer-list-update-hook #'wip--on-buffer-list-update))
+Also restores `switch-to-prev-buffer-skip'.  The `kill-emacs-hook'
+entry stays so scratchpads of inactive wips are still persisted on
+exit."
+  (remove-hook 'buffer-list-update-hook #'wip--on-buffer-list-update)
+  (setq switch-to-prev-buffer-skip wip--saved-prev-buffer-skip))
 
 (defun wip--restorable-config-p (config)
   "Return non-nil if CONFIG is a window configuration that can be restored.
@@ -221,7 +319,16 @@ belongs to a deleted frame, gets a fresh single window showing its
 scratchpad."
   (set-frame-parameter nil 'tabs (wip--wip-tabs wip))
   (if (wip--restorable-config-p (wip--wip-window-config wip))
-      (set-window-configuration (wip--wip-window-config wip))
+      (progn
+        (set-window-configuration (wip--wip-window-config wip))
+        ;; If the saved selected window's buffer died meanwhile,
+        ;; Emacs substitutes a buffer of its own choosing; switch to
+        ;; a wip buffer instead so the substitute is not adopted.
+        ;; When no member is left to show, fall back to the pad.
+        (unless (memq (window-buffer) (wip--live-buffers wip))
+          (switch-to-prev-buffer)
+          (unless (memq (window-buffer) (wip--live-buffers wip))
+            (switch-to-buffer (wip--get-pad wip)))))
     (delete-other-windows)
     (switch-to-buffer (wip--get-pad wip)))
   (force-mode-line-update t))
@@ -242,16 +349,17 @@ scratchpad."
   "Make WIP current, saving the state of wherever we came from."
   (if (eq wip wip--current)
       (message "Already in wip %s" (wip--wip-name wip))
-    (if wip--current
-        (wip--save-state wip--current)
-      (wip--save-global-state)
-      (wip--activate))
-    (setq wip--current wip)
-    ;; Most recently used first.
-    (setq wip--wips (cons (cons (wip--wip-name wip) wip)
-                          (rassq-delete-all wip wip--wips)))
-    (wip--sync-known-buffers)
-    (wip--restore-state wip)
+    (let ((wip--inhibit-adoption t))
+      (if wip--current
+          (wip--save-state wip--current)
+        (wip--save-global-state)
+        (wip--activate))
+      (setq wip--current wip)
+      ;; Most recently used first.
+      (setq wip--wips (cons (cons (wip--wip-name wip) wip)
+                            (rassq-delete-all wip wip--wips)))
+      (wip--sync-known-buffers)
+      (wip--restore-state wip))
     (message "wip: %s" (wip--wip-name wip))))
 
 ;;;###autoload
@@ -286,12 +394,14 @@ The wip itself stays active and can be re-entered with `wip'."
 The wip's scratchpad content is snapshotted to disk first, and its
 state directory under `wip-directory' is kept, so pad content
 remains recoverable after the kill.  When
-`wip-kill-exclusive-buffers' is non-nil, buffers belonging to no
-other wip are killed globally.  Like `kill-buffer' generally, that
-sweep discards unsaved non-file buffers without asking — including a
-pad that was renamed away earlier and never saved to a file; save
-promoted content if it must survive a wip kill.  If NAME is the
-current wip, the global context is restored."
+`wip-kill-exclusive-buffers' is non-nil, buffers that were created
+in this wip, still belong to it, and belong to no other wip are
+killed globally; buffers adopted from outside are left alive.  Like
+`kill-buffer' generally, that sweep discards unsaved non-file
+buffers without asking —
+including a pad that was renamed away earlier and never saved to a
+file; save promoted content if it must survive a wip kill.  If NAME
+is the current wip, the global context is restored."
   (interactive (list (wip--read-wip-name "Kill wip: ")))
   (let* ((entry (assoc name wip--wips))
          (wip (cdr entry)))
@@ -305,7 +415,8 @@ current wip, the global context is restored."
     (setq wip--wips (delq entry wip--wips))
     (when wip-kill-exclusive-buffers
       (dolist (buffer (wip--live-buffers wip))
-        (unless (wip--buffer-owners buffer)
+        (when (and (memq buffer (wip--wip-created wip))
+                   (null (wip--buffer-owners buffer)))
           (kill-buffer buffer))))
     (message "Killed wip %s" name)))
 
@@ -323,7 +434,7 @@ selected buffer is brought into the wip."
         (wip--add-buffer (current-buffer) wip--current))
     (let ((names (mapcar #'buffer-name
                          (remq (current-buffer)
-                               (wip--live-buffers wip--current)))))
+                               (wip--mru-buffers wip--current)))))
       (if (null names)
           (message "No other buffers in wip %s (C-u C-x b to pull one in)"
                    (wip--wip-name wip--current))
@@ -332,10 +443,12 @@ selected buffer is brought into the wip."
 
 (defun wip-ido-kill-buffer ()
   "Evict a buffer from the current wip, with ido completion.
-The buffer is only removed from the wip, not killed globally."
+The buffer is only removed from the wip, not killed globally, but
+windows showing it switch to another buffer, as they would if it had
+been killed."
   (interactive)
   (wip--ensure-current)
-  (let ((names (mapcar #'buffer-name (wip--live-buffers wip--current))))
+  (let ((names (mapcar #'buffer-name (wip--mru-buffers wip--current))))
     (if (null names)
         (message "No buffers in wip %s" (wip--wip-name wip--current))
       (let* ((default (car (member (buffer-name) names)))
@@ -344,7 +457,7 @@ The buffer is only removed from the wip, not killed globally."
              (buffer (get-buffer name)))
         (if (null buffer)
             (message "No such buffer: %s" name)
-          (wip--remove-buffer buffer wip--current)
+          (wip--evict-buffer buffer wip--current)
           (message "Evicted %s from wip %s"
                    name (wip--wip-name wip--current)))))))
 
@@ -366,15 +479,15 @@ The buffer is only removed from the wip, not killed globally."
 (defun wip-ibuffer-do-evict ()
   "Evict the marked buffers (or the buffer at point) from the wip.
 This replaces the kill commands in wip ibuffer buffers: buffers are
-removed from the wip but never killed globally.  Both regular marks
-and deletion marks count."
+removed from the wip (and from windows showing them) but never
+killed globally.  Both regular marks and deletion marks count."
   (interactive)
   (let ((wip (or wip-ibuffer--wip wip--current))
         (buffers (wip-ibuffer--target-buffers)))
     (unless wip
       (user-error "This ibuffer is not attached to a wip"))
     (dolist (buffer buffers)
-      (wip--remove-buffer buffer wip))
+      (wip--evict-buffer buffer wip))
     (ibuffer-update nil t)
     (message "Evicted %d buffer(s) from wip %s"
              (length buffers) (wip--wip-name wip))))
@@ -479,9 +592,13 @@ Contents are recovered from `wip--pad-file' when it exists; the file
 is deleted whenever a pad's promotion (rename or save to a file) is
 noticed, so promoted-away content is normally not resurrected.  The
 exception is `wip-kill', which snapshots even promoted content, so
-re-creating a killed wip can recover it."
+re-creating a killed wip can recover it.  The pad is registered with
+and owned by WIP itself, even when another wip is current (reachable
+via a wip ibuffer that outlived its wip being current)."
   (let ((file (wip--pad-file wip))
-        (buffer (generate-new-buffer wip-pad-buffer-name)))
+        (buffer (let ((wip--current wip)
+                      (wip--inhibit-adoption t))
+                  (generate-new-buffer wip-pad-buffer-name))))
     (with-current-buffer buffer
       (when (file-exists-p file)
         (insert-file-contents file))
@@ -493,6 +610,9 @@ re-creating a killed wip can recover it."
                 nil t))
     (setf (wip--wip-pad-buffer wip) buffer
           (wip--wip-pad-name wip) (buffer-name buffer))
+    (puthash buffer t wip--known-buffers)
+    (unless (memq buffer (wip--wip-created wip))
+      (push buffer (wip--wip-created wip)))
     (wip--add-buffer buffer wip)
     buffer))
 
