@@ -48,6 +48,40 @@
     (wip "alpha")
     (should (equal (mapcar #'car wip--wips) '("alpha" "beta")))))
 
+(ert-deftest wip-test-stale-struct-upgraded-on-entry ()
+  "Wip records from an older wip.el layout are upgraded, not crashed on.
+Reloading wip.el after a struct change leaves stale records in
+`wip--wips'; creating or entering a wip used to signal
+args-out-of-range on them.  The name and live buffers survive the
+upgrade; the rest of the state is rebuilt lazily."
+  (wip-test--fixture
+    (let* ((buffer (generate-new-buffer "wip-test-old-member"))
+           ;; The original 7-slot layout:
+           ;; [wip--wip name buffers window-config tabs pad pad-name]
+           (stale (record 'wip--wip "legacy" (list buffer)
+                          nil nil nil nil)))
+      (push (cons "legacy" stale) wip--wips)
+      ;; Creating a NEW wip must not crash on the stale record either.
+      (wip "fresh")
+      (wip "legacy")
+      (should (wip--wip-compatible-p wip--current))
+      (should (equal (wip--wip-name wip--current) "legacy"))
+      (should (memq buffer (wip--wip-buffers wip--current))))))
+
+(ert-deftest wip-test-stale-current-upgraded-by-tracking-hook ()
+  "The tracking hook upgrades a stale `wip--current' instead of erroring.
+After a reload mid-wip, the very next buffer event goes through
+`wip--on-buffer-list-update'; it must survive the old record."
+  (wip-test--fixture
+    (wip "alpha")
+    ;; Simulate a reload: swap the live struct for an old-layout one.
+    (let ((stale (record 'wip--wip "alpha" nil nil nil nil nil)))
+      (setcdr (assoc "alpha" wip--wips) stale)
+      (setq wip--current stale)
+      (let ((buffer (generate-new-buffer "wip-test-post-reload")))
+        (should (wip--wip-compatible-p wip--current))
+        (should (memq buffer (wip--wip-buffers wip--current)))))))
+
 (ert-deftest wip-test-blank-name-rejected ()
   (wip-test--fixture
     (should-error (wip "  ") :type 'user-error)))

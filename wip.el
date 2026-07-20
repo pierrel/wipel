@@ -149,6 +149,45 @@ buffers momentarily on display during a transition are not pulled
 into the new wip, and so that a buffer being evicted is not
 re-adopted while windows still show it.")
 
+;;;; Reload compatibility
+
+(defconst wip--wip-length (length (wip--wip-create :name ""))
+  "Record length of the current `wip--wip' layout.
+Used to detect stale records after wip.el is reloaded with a
+changed struct definition.")
+
+(defun wip--wip-compatible-p (object)
+  "Return non-nil if OBJECT is a wip record with the current layout."
+  (and (recordp object)
+       (eq (aref object 0) 'wip--wip)
+       (= (length object) wip--wip-length)))
+
+(defun wip--upgrade-wip (object)
+  "Return OBJECT, or a compatible replacement rebuilt from it.
+A record from an older wip.el layout keeps its name (slot 1) and
+live buffers (slot 2) — stable across all layouts so far; the rest
+of its state (window config, tabs, pad bookkeeping, eviction and
+ownership lists) is dropped and gets rebuilt lazily."
+  (if (wip--wip-compatible-p object)
+      object
+    (let ((new (wip--wip-create :name (aref object 1))))
+      (setf (wip--wip-buffers new)
+            (seq-filter #'buffer-live-p
+                        (and (> (length object) 2) (aref object 2))))
+      new)))
+
+(defun wip--upgrade-wips ()
+  "Replace stale-layout wip records after a reload of wip.el.
+Walks `wip--wips', upgrading each record via `wip--upgrade-wip' and
+keeping `wip--current' pointing at the upgraded object."
+  (setq wip--wips
+        (mapcar (lambda (entry)
+                  (let ((new (wip--upgrade-wip (cdr entry))))
+                    (when (eq (cdr entry) wip--current)
+                      (setq wip--current new))
+                    (cons (car entry) new)))
+                wip--wips)))
+
 ;;;; Buffer bookkeeping
 
 (defun wip--trackable-buffer-p (buffer)
@@ -234,6 +273,8 @@ wip transitions and evictions (see `wip--inhibit-adoption').
 Buffers created with buffer hooks inhibited are picked up on the
 next run."
   (when wip--current
+    (unless (wip--wip-compatible-p wip--current)
+      (wip--upgrade-wips))
     (dolist (buffer (buffer-list))
       (unless (gethash buffer wip--known-buffers)
         (puthash buffer t wip--known-buffers)
@@ -267,9 +308,12 @@ adopt)."
 (defvar wip-mode)
 
 (defun wip--ensure-current ()
-  "Signal a `user-error' unless a wip is current."
+  "Signal a `user-error' unless a wip is current.
+Also upgrades stale wip records left behind by a reload of wip.el."
   (unless wip--current
-    (user-error "Not in a wip (use `wip' / C-c w m to enter one)")))
+    (user-error "Not in a wip (use `wip' / C-c w m to enter one)"))
+  (unless (wip--wip-compatible-p wip--current)
+    (wip--upgrade-wips)))
 
 (defun wip--read-wip-name (prompt &optional allow-new)
   "Read the name of a wip with PROMPT using ido completion.
@@ -370,6 +414,7 @@ creates a fresh wip."
   (interactive (list (wip--read-wip-name "wip: " t)))
   (when (string-blank-p name)
     (user-error "A wip needs a name"))
+  (wip--upgrade-wips)
   (unless wip-mode (wip-mode 1))
   (wip--switch-to
    (or (cdr (assoc name wip--wips))
@@ -403,6 +448,7 @@ including a pad that was renamed away earlier and never saved to a
 file; save promoted content if it must survive a wip kill.  If NAME
 is the current wip, the global context is restored."
   (interactive (list (wip--read-wip-name "Kill wip: ")))
+  (wip--upgrade-wips)
   (let* ((entry (assoc name wip--wips))
          (wip (cdr entry)))
     (unless wip
@@ -668,7 +714,9 @@ cannot re-trigger pad handling via the kill hook."
 
 (defun wip--persist-all-pads ()
   "Persist the scratchpads of all active wips.
-Runs from `kill-emacs-hook'."
+Runs from `kill-emacs-hook'.  Stale wip records from a reload are
+upgraded first so one incompatible record cannot abort the loop."
+  (wip--upgrade-wips)
   (dolist (entry wip--wips)
     (wip--persist-pad (cdr entry))))
 
