@@ -93,7 +93,7 @@ All of these assume you are in a wip.
 
 Membership is one generic rule: any buffer created while in a wip is added to the wip, and so is any buffer displayed in one of its windows — created, reused (=find-file=, =dired=), selected, or popped up. This includes files opened, unfile'd buffers, info pages, async commands, etc. The only exceptions are internal (space-prefixed) buffers and evicted buffers. Buffers /created/ in the wip are owned by it; adopted pre-existing buffers are only borrowed.
 ** Window management
-When moving between wips, the previously-selected wip maintains its buffer's window states so that revisiting a previous wip resurfaces the window configuration as it was before the switch.
+When moving between wips, the previously-selected wip maintains its buffer's window states so that revisiting a previous wip resurfaces the window configuration as it was before the switch. This state is separate for each Emacs frame, so work in one frame never replaces another frame's tabs or window layout.
 *** Tab-bar
 wips also contain their own set of tabs, which are also maintained across switches. All of the common tab-bar commands work in the context of the current wip. The tab bar is populated with only the current set of tabs that belong to the wip.
 
