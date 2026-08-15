@@ -174,10 +174,14 @@ between frames."
   "Load FRAME's wip session from its frame parameters.
 A frame without saved state starts outside a wip with its own buffer
 tracking table and its normal `switch-to-prev-buffer-skip' value."
-  (let ((saved-prev-buffer-skip
-         (if (assq 'wip--saved-prev-buffer-skip (frame-parameters frame))
-             (frame-parameter frame 'wip--saved-prev-buffer-skip)
-           wip--saved-prev-buffer-skip)))
+  (let* ((normal-prev-buffer-skip
+          (if wip--current
+              wip--saved-prev-buffer-skip
+            switch-to-prev-buffer-skip))
+         (saved-prev-buffer-skip
+          (if (assq 'wip--saved-prev-buffer-skip (frame-parameters frame))
+              (frame-parameter frame 'wip--saved-prev-buffer-skip)
+            normal-prev-buffer-skip)))
     (setq wip--session-frame frame
           wip--current (frame-parameter frame 'wip--current)
           wip--global-window-config
@@ -517,6 +521,7 @@ The wip itself stays active and can be re-entered with `wip'."
     (setq wip--current nil)
     (wip--deactivate)
     (wip--restore-global-state)
+    (wip--save-frame-session)
     (message "Left wip %s" name)))
 
 (defun wip--leave-wip-everywhere (wip)
