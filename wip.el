@@ -28,9 +28,10 @@
 ;;   buffers; with a prefix argument it shows all buffers, and a
 ;;   buffer selected that way is brought into the wip.
 ;; - `C-x k' (`wip-ido-kill-buffer') evicts a buffer from the wip
-;;   without killing it globally.  Eviction is sticky: the buffer is
-;;   not re-adopted just by being displayed again; bring it back
-;;   with C-u C-x b.
+;;   without killing it globally; `C-u C-x k' runs the normal
+;;   `kill-buffer' command.  Eviction is sticky: the buffer is not
+;;   re-adopted just by being displayed again; bring it back with
+;;   C-u C-x b.
 ;; - Each frame keeps its own current wip, window configuration, and
 ;;   tab-bar tabs.  A wip can therefore be used in several frames
 ;;   without one frame replacing another's view.
@@ -45,6 +46,8 @@
 ;;   C-c w b   `wip-ibuffer'  ibuffer filtered to the wip
 ;;   C-c w p   `wip-pad'    show the wip scratchpad
 ;;   C-c w f   `wip-firefox'  show/launch a wip-local Firefox (EXWM)
+;;   C-c w t   `wip-terminal' show a wip-local vterm or Eshell
+;;   C-c w g   `wip-tile-buffers' tile matching buffers in the current wip
 ;;
 ;; Current limitations of this first pass:
 ;;
@@ -52,7 +55,7 @@
 ;;   is not implemented yet.
 ;; - The overview and history features from the README are not
 ;;   implemented yet, nor are project-scoped file selection and
-;;   wip-scoped terminals/subcommands.
+;;   wip-scoped subcommands.
 ;; - Only the scratchpad is persisted across Emacs sessions; full wip
 ;;   recovery is not implemented yet.  Scratchpads are written to
 ;;   disk on wip switches, exits, wip kills, pad kills, and Emacs
@@ -67,6 +70,8 @@
 (require 'ido)
 (require 'ibuffer)
 (require 'tab-bar)
+
+(declare-function vterm "vterm" (&optional buffer-name))
 
 ;;;; Customization
 
@@ -147,6 +152,9 @@ Suppresses display adoption in `wip--on-buffer-list-update' so that
 buffers momentarily on display during a transition are not pulled
 into the new wip, and so that a buffer being evicted is not
 re-adopted while windows still show it.")
+
+(defvar-local wip--terminal-wip nil
+  "Wip record that owns this terminal buffer, or nil otherwise.")
 
 (defvar wip--saved-prev-buffer-skip nil
   "Value of `switch-to-prev-buffer-skip' before wip took it over.
@@ -260,7 +268,15 @@ upgraded object."
                          (wip--upgrade-wip current))))
             (set-frame-parameter frame 'wip--current new)
             (when (eq frame wip--session-frame)
-              (setq wip--current new))))))))
+              (setq wip--current new))))))
+    ;; Terminal buffers refer to their owning record.  Preserve that
+    ;; ownership when a reload replaces a stale record.
+    (dolist (buffer (buffer-list))
+      (let ((replacement (assq (buffer-local-value 'wip--terminal-wip buffer)
+                               upgrades)))
+        (when replacement
+          (with-current-buffer buffer
+            (setq-local wip--terminal-wip (cdr replacement))))))))
 
 ;;;; Buffer bookkeeping
 
@@ -388,11 +404,20 @@ Also upgrades stale wip records left behind by a reload of wip.el."
   (unless (wip--wip-compatible-p wip--current)
     (wip--upgrade-wips)))
 
+(defun wip--wip-selection-names ()
+  "Return wip names in MRU order, with the current wip last."
+  (let ((names (mapcar #'car wip--wips)))
+    (if wip--current
+        (let ((current-name (wip--wip-name wip--current)))
+          (append (seq-remove (lambda (name) (equal name current-name)) names)
+                  (list current-name)))
+      names)))
+
 (defun wip--read-wip-name (prompt &optional allow-new)
   "Read the name of a wip with PROMPT using ido completion.
 When ALLOW-NEW is non-nil, any input is accepted; otherwise the input
 must name an active wip."
-  (let ((names (mapcar #'car wip--wips)))
+  (let ((names (wip--wip-selection-names)))
     (when (and (null names) (not allow-new))
       (user-error "No active wips"))
     (ido-completing-read prompt names nil (not allow-new))))
@@ -589,25 +614,28 @@ selected buffer is brought into the wip."
         (switch-to-buffer
          (ido-completing-read "wip buffer: " names nil t))))))
 
-(defun wip-ido-kill-buffer ()
+(defun wip-ido-kill-buffer (&optional arg)
   "Evict a buffer from the current wip, with ido completion.
 The buffer is only removed from the wip, not killed globally, but
 windows showing it switch to another buffer, as they would if it had
-been killed."
-  (interactive)
+been killed.  With prefix argument ARG, run the normal `kill-buffer'
+command instead."
+  (interactive "P")
   (wip--ensure-current)
-  (let ((names (mapcar #'buffer-name (wip--mru-buffers wip--current))))
-    (if (null names)
-        (message "No buffers in wip %s" (wip--wip-name wip--current))
-      (let* ((default (car (member (buffer-name) names)))
-             (name (ido-completing-read "Evict from wip: " names nil t
-                                        nil nil default))
-             (buffer (get-buffer name)))
-        (if (null buffer)
-            (message "No such buffer: %s" name)
-          (wip--evict-buffer buffer wip--current)
-          (message "Evicted %s from wip %s"
-                   name (wip--wip-name wip--current)))))))
+  (if arg
+      (call-interactively #'kill-buffer)
+    (let ((names (mapcar #'buffer-name (wip--mru-buffers wip--current))))
+      (if (null names)
+          (message "No buffers in wip %s" (wip--wip-name wip--current))
+        (let* ((default (car (member (buffer-name) names)))
+               (name (ido-completing-read "Evict from wip: " names nil t
+                                          nil nil default))
+               (buffer (get-buffer name)))
+          (if (null buffer)
+              (message "No such buffer: %s" name)
+            (wip--evict-buffer buffer wip--current)
+            (message "Evicted %s from wip %s"
+                     name (wip--wip-name wip--current))))))))
 
 ;;;; ibuffer integration
 
@@ -860,6 +888,108 @@ is current at that moment — stay in the wip until the window maps."
       (message "Launching %s for wip %s"
                (car wip-firefox-command) (wip--wip-name wip--current)))))
 
+;;;; Terminal integration
+
+(defun wip--terminal-buffer-name (wip)
+  "Return the terminal buffer name reserved for WIP."
+  (format "*wip terminal: %s*" (wip--wip-name wip)))
+
+(defun wip--terminal-buffer (wip)
+  "Return WIP's live terminal buffer, or nil."
+  (seq-find (lambda (buffer)
+              (and (eq (buffer-local-value 'wip--terminal-wip buffer) wip)
+                   (or (not (with-current-buffer buffer
+                              (derived-mode-p 'vterm-mode)))
+                       (process-live-p (get-buffer-process buffer)))))
+            (buffer-list)))
+
+(defun wip--terminal-directory ()
+  "Return a usable local directory for a new terminal."
+  (if (and (not (file-remote-p default-directory))
+           (file-directory-p default-directory))
+      default-directory
+    (file-name-as-directory (expand-file-name (or (getenv "HOME") "~")))))
+
+(defun wip-terminal ()
+  "Show the current wip's terminal, creating it if necessary.
+Uses vterm when it is installed; otherwise starts Eshell.  The buffer
+name is unique to the wip, so repeated calls return to the same
+terminal."
+  (interactive)
+  (wip--ensure-current)
+  (let* ((wip wip--current)
+         (buffer (wip--terminal-buffer wip)))
+    (if buffer
+        (display-buffer buffer)
+      (let ((name (generate-new-buffer-name (wip--terminal-buffer-name wip))))
+        (let ((default-directory (wip--terminal-directory)))
+          (setq buffer
+                (if (require 'vterm nil t)
+                    (progn
+                      (vterm name)
+                      (get-buffer name))
+                  (let ((eshell (eshell t)))
+                    (with-current-buffer eshell
+                      (rename-buffer name))
+                    eshell))))
+        (with-current-buffer buffer
+          (setq-local wip--terminal-wip wip))
+        (display-buffer buffer)))))
+
+;;;; Buffer tiling
+
+(defconst wip--tile-empty-buffer-name " *wip tile empty*"
+  "Name of the internal buffer used to complete a tile grid.")
+
+(defun wip--matching-buffers (substring wip)
+  "Return WIP's live buffers whose names contain SUBSTRING, ignoring case.
+The internal blank tile buffer is excluded."
+  (let ((case-fold-search t)
+        (pattern (regexp-quote substring)))
+    (seq-filter (lambda (buffer)
+                  (and (not (equal (buffer-name buffer)
+                                   wip--tile-empty-buffer-name))
+                       (string-match-p pattern (buffer-name buffer))))
+                (wip--live-buffers wip))))
+
+(defun wip-tile-buffers (substring)
+  "Tile current wip buffers whose names contain SUBSTRING in the selected frame.
+Matching is case-insensitive and literal.  Empty cells are filled
+with an internal blank buffer so every matching buffer gets the same
+size."
+  (interactive (list (read-string "Tile buffers matching: ")))
+  (wip--ensure-current)
+  (let ((buffers (wip--matching-buffers substring wip--current)))
+    (unless buffers
+      (user-error "No buffer names contain %S" substring))
+    (let* ((count (length buffers))
+           (columns (ceiling (sqrt count)))
+           (rows (ceiling (/ (float count) columns)))
+           (empty (get-buffer-create wip--tile-empty-buffer-name))
+           (shown (append buffers
+                          (make-list (- (* rows columns) count) empty)))
+           (configuration (current-window-configuration)))
+      (condition-case err
+          (progn
+            (delete-other-windows)
+            (dotimes (_ (1- rows))
+              (split-window-below))
+            (dolist (window (window-list nil 'never))
+              (with-selected-window window
+                (dotimes (_ (1- columns))
+                  (split-window-right))))
+            (balance-windows)
+            (let ((windows (window-list nil 'never)))
+              (cl-mapc #'set-window-buffer windows shown)
+              (select-window (car windows))))
+        (quit
+         (set-window-configuration configuration)
+         (signal (car err) (cdr err)))
+        (error
+         (set-window-configuration configuration)
+         (user-error "Cannot tile %d buffers: %s"
+                     count (error-message-string err)))))))
+
 ;;;; Keymaps and mode
 
 (defvar wip--session-map
@@ -881,6 +1011,10 @@ the entry is installed when `wip-mode' is first enabled.")
     (define-key map (kbd "C-c w f") #'wip-firefox)
     map)
   "Keymap for `wip-mode'.")
+
+;; `wip-mode-map' survives reloads, so install new bindings outside its `defvar'.
+(define-key wip-mode-map (kbd "C-c w t") #'wip-terminal)
+(define-key wip-mode-map (kbd "C-c w g") #'wip-tile-buffers)
 
 ;;;###autoload
 (define-minor-mode wip-mode

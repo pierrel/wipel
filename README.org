@@ -77,7 +77,7 @@ I want to run a subcommand (async or sync, default async) within the context of 
 * Interface
 wip is *modal* meaning that you are either in a wip or not. Once you are in a wip, common commands work /within the context of the wip/. The main work of wip is to group buffers and tabs into filtered state so that you can focus.
 ** Work management
-=C-c w m= calls =wip= is the main command and it can be called with . It will show you your active wips (if any) as ido completions as well as the ability to type a new wip name for a fresh wip.
+=C-c w m= calls =wip=, the main command. It shows active wips in most-recently-used order, with the current wip last, so the previously used wip is selected first. You can also type a new wip name for a fresh wip.
 
 =C-c w q= calls =wip-exit= takes you out of the wip and returns all keybindings to their previous settings. Active wips are not killed if you exit wip mode.
 
@@ -87,7 +87,7 @@ All of these assume you are in a wip.
 
 =C-x b= calls =wip-ido-switch-buffer=, which shows =ido-switch-buffer=, but filtered to only the buffers in the wip. Calling it with the prefix command shows the same as =ido-switch-buffer= but not filtered (shows you all buffers). Once a buffer outside of a wip is selected, it becomes part of the wip.
 
-=C-x k= calls =wip-ido-kill-buffer=, which shows =ido-kill-buffer= buffers, filtered to the current wip. When a buffer is selected, it is removed from the wip (not killed in the global buffer state), and windows showing it switch to another buffer as if it had been killed. Eviction is sticky: the buffer does not rejoin the wip just by being displayed again — bring it back explicitly with =C-u C-x b=.
+=C-x k= calls =wip-ido-kill-buffer=, which shows =ido-kill-buffer= buffers, filtered to the current wip. When a buffer is selected, it is removed from the wip (not killed in the global buffer state), and windows showing it switch to another buffer as if it had been killed. =C-u C-x k= runs the normal =kill-buffer= command. Eviction is sticky: the buffer does not rejoin the wip just by being displayed again — bring it back explicitly with =C-u C-x b=.
 
 =C-c w b= shows ibuffer filtered to just those buffers in the current wip. You can further filter while in this filtered ibuffer. Killing a buffer from this special ibuffer mode only removes it from the wip; as with =C-x k=, windows showing it switch to another buffer.
 
@@ -118,6 +118,10 @@ NOTE: this section is left without specific function names as I explore whether 
 This is only available if your emacs can natively, like exwm.
 
 =C-c w f= calls =wip-firefox= and displays a wip-local firefox buffer. It either creates it or displays it if it already exists.
+** Terminal
+=C-c w t= calls =wip-terminal= and displays a terminal named uniquely for the current wip. It creates a vterm when the vterm package is installed, or falls back to Eshell otherwise. It starts in the current local directory when valid, otherwise the local Emacs host's home directory. Repeating the command returns to the same terminal buffer for that wip.
+** Tile buffers
+=C-c w g= calls =wip-tile-buffers= and prompts for a literal, case-insensitive substring. It displays every buffer in the current wip whose name contains that substring, except its internal blank filler, in a balanced grid in the selected frame. Blank cells complete partial grids so the matching buffers remain the same size.
 ** Overview :future:
 =C-c w o= displays a buffer that contains all active wips, their tabs (if any) and a short representation of their content like so:
 #+begin_example

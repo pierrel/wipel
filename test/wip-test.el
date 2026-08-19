@@ -48,6 +48,16 @@
     (wip "alpha")
     (should (equal (mapcar #'car wip--wips) '("alpha" "beta")))))
 
+(ert-deftest wip-test-wip-selection-offers-previous-wip-first ()
+  "Wip selection puts the current wip after the other MRU entries."
+  (wip-test--fixture
+    (wip "alpha")
+    (wip "beta")
+    (wip "gamma")
+    (wip "beta")
+    (should (equal (wip--wip-selection-names)
+                   '("gamma" "alpha" "beta")))))
+
 (ert-deftest wip-test-stale-struct-upgraded-on-entry ()
   "Wip records from an older wip.el layout are upgraded, not crashed on.
 Reloading wip.el after a struct change leaves stale records in
@@ -232,6 +242,16 @@ windows."
       (should (buffer-live-p buffer))
       ;; ...but no longer shown in any window.
       (should-not (get-buffer-window buffer)))))
+
+(ert-deftest wip-test-prefixed-kill-runs-normal-kill-buffer ()
+  "A prefix argument makes `wip-ido-kill-buffer' run `kill-buffer'."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (generate-new-buffer "wip-test-kill")))
+      (let ((read-buffer-function
+             (lambda (&rest _args) (buffer-name buffer))))
+        (wip-ido-kill-buffer '(4)))
+      (should-not (buffer-live-p buffer)))))
 
 (ert-deftest wip-test-evict-keeps-buffer-alive ()
   (wip-test--fixture
@@ -537,6 +557,166 @@ instead, and the substitute must not join the wip."
       (should (memq pad (wip--wip-buffers wip--current)))
       ;; Idempotent while the pad is live.
       (should (eq pad (wip--get-pad wip--current))))))
+
+(ert-deftest wip-test-terminal-falls-back-to-eshell ()
+  "A wip terminal uses its wip-specific name when vterm is unavailable."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((original-require (symbol-function 'require)))
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'vterm)
+                       nil
+                     (funcall original-require feature filename noerror)))))
+        (wip-terminal)))
+    (let ((buffer (get-buffer "*wip terminal: alpha*")))
+      (should buffer)
+      (with-current-buffer buffer
+        (should (derived-mode-p 'eshell-mode)))
+      (wip-terminal)
+      (should (eq buffer (get-buffer "*wip terminal: alpha*"))))))
+
+(ert-deftest wip-test-terminal-ignores-unrelated-name-collision ()
+  "A non-terminal buffer with the terminal name is not reused."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((collision (generate-new-buffer "*wip terminal: alpha*")))
+      (let ((original-require (symbol-function 'require)))
+        (cl-letf (((symbol-function 'require)
+                   (lambda (feature &optional filename noerror)
+                     (if (eq feature 'vterm)
+                         nil
+                       (funcall original-require feature filename noerror)))))
+          (wip-terminal)))
+      (should-not (eq collision (wip--terminal-buffer wip--current))))))
+
+(ert-deftest wip-test-terminal-ignores-dead-vterm ()
+  "A terminated vterm is recreated rather than redisplayed."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (generate-new-buffer "wip-test-dead-vterm"))
+          (wip wip--current))
+      (with-current-buffer buffer
+        (setq-local wip--terminal-wip wip)
+        (setq major-mode 'vterm-mode))
+      (should-not (wip--terminal-buffer wip)))))
+
+(ert-deftest wip-test-terminal-survives-wip-upgrade ()
+  "A terminal remains associated with its wip after its record is replaced."
+  (wip-test--fixture
+    (wip "alpha")
+    (let* ((buffer (generate-new-buffer "wip-test-terminal-reload"))
+           ;; The original 7-slot layout, as would remain after reload.
+           (stale (record 'wip--wip "alpha" nil nil nil nil nil)))
+      (with-current-buffer buffer
+        (setq-local wip--terminal-wip stale))
+      (setcdr (assoc "alpha" wip--wips) stale)
+      (setq wip--current stale)
+      (wip--upgrade-wips)
+      (should (eq buffer (wip--terminal-buffer wip--current))))))
+
+(ert-deftest wip-test-terminal-owner-is-declared-before-upgrades ()
+  "Reloads declare terminal ownership before upgrade code can use it."
+  (let* ((source (expand-file-name "wip.el"
+                                   (file-name-directory (locate-library "wip"))))
+         (contents (with-temp-buffer
+                     (insert-file-contents source)
+                     (buffer-string))))
+    (should (< (string-match-p (regexp-quote "(defvar-local wip--terminal-wip")
+                               contents)
+               (string-match-p (regexp-quote "(defun wip--upgrade-wips")
+                               contents)))))
+
+(ert-deftest wip-test-terminal-does-not-survive-kill-and-recreate ()
+  "A terminal belongs to one wip lifetime, not just its name."
+  (wip-test--fixture
+    (let ((wip-kill-exclusive-buffers nil))
+      (wip "alpha")
+      (let ((buffer (generate-new-buffer "wip-test-old-terminal")))
+        (with-current-buffer buffer
+          (setq-local wip--terminal-wip wip--current))
+        (wip-kill "alpha")
+        (wip "alpha")
+        (should-not (eq buffer (wip--terminal-buffer wip--current)))))))
+
+(ert-deftest wip-test-terminal-invalid-directory-falls-back-to-local-home ()
+  "A terminal never inherits an invalid or remote working directory."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((default-directory "/nonexistent-wip-test-directory/")
+          (original-require (symbol-function 'require)))
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'vterm)
+                       nil
+                     (funcall original-require feature filename noerror)))))
+        (wip-terminal)))
+    (with-current-buffer (wip--terminal-buffer wip--current)
+      (should (equal default-directory
+                     (file-name-as-directory
+                      (expand-file-name (or (getenv "HOME") "~"))))))))
+
+(ert-deftest wip-test-terminal-key-survives-reload ()
+  "Reloading wip.el installs the terminal binding in an existing keymap."
+  (let* ((key (kbd "C-c w t"))
+         (saved (lookup-key wip-mode-map key))
+         (source (expand-file-name "wip.el"
+                                   (file-name-directory (locate-library "wip")))))
+    (unwind-protect
+        (progn
+          (define-key wip-mode-map key nil)
+          (load source nil nil t)
+          (should (eq (lookup-key wip-mode-map key) #'wip-terminal)))
+      (define-key wip-mode-map key saved))))
+
+(ert-deftest wip-test-tile-buffers-matches-substring-in-a-balanced-grid ()
+  "Tiling shows each matching buffer in an equally sized grid cell."
+  (wip-test--fixture
+    (let ((foreign (generate-new-buffer "wip-test-tile-foreign")))
+      (wip "alpha")
+      (let ((first (generate-new-buffer "wip-test-tile-one"))
+          (second (generate-new-buffer "wip-test-tile-two"))
+          (third (generate-new-buffer "wip-test-tile-three"))
+          (unmatched (generate-new-buffer "wip-test-unmatched")))
+        (wip-tile-buffers "tile")
+        (let ((windows (window-list nil 'never)))
+          (should (= (length windows) 4))
+          (dolist (buffer (list first second third))
+            (should (memq buffer (mapcar #'window-buffer windows))))
+          (should-not (memq foreign (mapcar #'window-buffer windows)))
+          (should-not (memq unmatched (mapcar #'window-buffer windows)))
+          (should (apply #'= (mapcar #'window-total-width windows)))
+          (should (<= (- (apply #'max (mapcar #'window-total-height windows))
+                         (apply #'min (mapcar #'window-total-height windows)))
+                      1)))))))
+
+(ert-deftest wip-test-tile-buffers-no-match-keeps-layout ()
+  "A failed tile request leaves the selected frame unchanged."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (window-buffer)))
+      (should-error (wip-tile-buffers "wip-test-no-match") :type 'user-error)
+      (should (= (length (window-list nil 'never)) 1))
+      (should (eq (window-buffer) buffer)))))
+
+(ert-deftest wip-test-tile-buffers-quit-keeps-layout ()
+  "Quitting a tile request restores the previous layout."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((right (generate-new-buffer "wip-test-tile-right")))
+      (set-window-buffer (split-window-right) right)
+      (let ((before (mapcar #'window-buffer (window-list nil 'never))))
+        (dolist (name '("wip-test-tile-one" "wip-test-tile-two"
+                        "wip-test-tile-three"))
+          (generate-new-buffer name))
+        (cl-letf (((symbol-function 'split-window-below)
+                   (lambda (&rest _) (signal 'quit nil))))
+          (should (eq (condition-case nil
+                          (progn (wip-tile-buffers "wip-test-tile") nil)
+                        (quit 'quit))
+                      'quit)))
+        (should (equal (mapcar #'window-buffer (window-list nil 'never))
+                       before))))))
 
 (ert-deftest wip-test-pad-persist-and-recover ()
   (wip-test--fixture
