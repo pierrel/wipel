@@ -401,11 +401,20 @@ Also upgrades stale wip records left behind by a reload of wip.el."
   (unless (wip--wip-compatible-p wip--current)
     (wip--upgrade-wips)))
 
+(defun wip--wip-selection-names ()
+  "Return wip names in MRU order, with the current wip last."
+  (let ((names (mapcar #'car wip--wips)))
+    (if wip--current
+        (let ((current-name (wip--wip-name wip--current)))
+          (append (seq-remove (lambda (name) (equal name current-name)) names)
+                  (list current-name)))
+      names)))
+
 (defun wip--read-wip-name (prompt &optional allow-new)
   "Read the name of a wip with PROMPT using ido completion.
 When ALLOW-NEW is non-nil, any input is accepted; otherwise the input
 must name an active wip."
-  (let ((names (mapcar #'car wip--wips)))
+  (let ((names (wip--wip-selection-names)))
     (when (and (null names) (not allow-new))
       (user-error "No active wips"))
     (ido-completing-read prompt names nil (not allow-new))))

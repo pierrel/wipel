@@ -77,7 +77,7 @@ I want to run a subcommand (async or sync, default async) within the context of 
 * Interface
 wip is *modal* meaning that you are either in a wip or not. Once you are in a wip, common commands work /within the context of the wip/. The main work of wip is to group buffers and tabs into filtered state so that you can focus.
 ** Work management
-=C-c w m= calls =wip= is the main command and it can be called with . It will show you your active wips (if any) as ido completions as well as the ability to type a new wip name for a fresh wip.
+=C-c w m= calls =wip= is the main command and it can be called with . It shows active wips in most-recently-used order, with the current wip last, so the previously used wip is selected first. You can also type a new wip name for a fresh wip.
 
 =C-c w q= calls =wip-exit= takes you out of the wip and returns all keybindings to their previous settings. Active wips are not killed if you exit wip mode.
 

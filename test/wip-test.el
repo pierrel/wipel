@@ -48,6 +48,16 @@
     (wip "alpha")
     (should (equal (mapcar #'car wip--wips) '("alpha" "beta")))))
 
+(ert-deftest wip-test-wip-selection-offers-previous-wip-first ()
+  "Wip selection puts the current wip after the other MRU entries."
+  (wip-test--fixture
+    (wip "alpha")
+    (wip "beta")
+    (wip "gamma")
+    (wip "beta")
+    (should (equal (wip--wip-selection-names)
+                   '("gamma" "alpha" "beta")))))
+
 (ert-deftest wip-test-stale-struct-upgraded-on-entry ()
   "Wip records from an older wip.el layout are upgraded, not crashed on.
 Reloading wip.el after a struct change leaves stale records in
