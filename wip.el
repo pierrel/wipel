@@ -28,9 +28,10 @@
 ;;   buffers; with a prefix argument it shows all buffers, and a
 ;;   buffer selected that way is brought into the wip.
 ;; - `C-x k' (`wip-ido-kill-buffer') evicts a buffer from the wip
-;;   without killing it globally.  Eviction is sticky: the buffer is
-;;   not re-adopted just by being displayed again; bring it back
-;;   with C-u C-x b.
+;;   without killing it globally; `C-u C-x k' runs the normal
+;;   `kill-buffer' command.  Eviction is sticky: the buffer is not
+;;   re-adopted just by being displayed again; bring it back with
+;;   C-u C-x b.
 ;; - Each frame keeps its own current wip, window configuration, and
 ;;   tab-bar tabs.  A wip can therefore be used in several frames
 ;;   without one frame replacing another's view.
@@ -45,6 +46,7 @@
 ;;   C-c w b   `wip-ibuffer'  ibuffer filtered to the wip
 ;;   C-c w p   `wip-pad'    show the wip scratchpad
 ;;   C-c w f   `wip-firefox'  show/launch a wip-local Firefox (EXWM)
+;;   C-c w t   `wip-terminal' show a wip-local vterm or Eshell
 ;;
 ;; Current limitations of this first pass:
 ;;
@@ -52,7 +54,7 @@
 ;;   is not implemented yet.
 ;; - The overview and history features from the README are not
 ;;   implemented yet, nor are project-scoped file selection and
-;;   wip-scoped terminals/subcommands.
+;;   wip-scoped subcommands.
 ;; - Only the scratchpad is persisted across Emacs sessions; full wip
 ;;   recovery is not implemented yet.  Scratchpads are written to
 ;;   disk on wip switches, exits, wip kills, pad kills, and Emacs
@@ -67,6 +69,8 @@
 (require 'ido)
 (require 'ibuffer)
 (require 'tab-bar)
+
+(declare-function vterm "vterm" (&optional buffer-name))
 
 ;;;; Customization
 
@@ -589,25 +593,28 @@ selected buffer is brought into the wip."
         (switch-to-buffer
          (ido-completing-read "wip buffer: " names nil t))))))
 
-(defun wip-ido-kill-buffer ()
+(defun wip-ido-kill-buffer (&optional arg)
   "Evict a buffer from the current wip, with ido completion.
 The buffer is only removed from the wip, not killed globally, but
 windows showing it switch to another buffer, as they would if it had
-been killed."
-  (interactive)
+been killed.  With prefix argument ARG, run the normal `kill-buffer'
+command instead."
+  (interactive "P")
   (wip--ensure-current)
-  (let ((names (mapcar #'buffer-name (wip--mru-buffers wip--current))))
-    (if (null names)
-        (message "No buffers in wip %s" (wip--wip-name wip--current))
-      (let* ((default (car (member (buffer-name) names)))
-             (name (ido-completing-read "Evict from wip: " names nil t
-                                        nil nil default))
-             (buffer (get-buffer name)))
-        (if (null buffer)
-            (message "No such buffer: %s" name)
-          (wip--evict-buffer buffer wip--current)
-          (message "Evicted %s from wip %s"
-                   name (wip--wip-name wip--current)))))))
+  (if arg
+      (call-interactively #'kill-buffer)
+    (let ((names (mapcar #'buffer-name (wip--mru-buffers wip--current))))
+      (if (null names)
+          (message "No buffers in wip %s" (wip--wip-name wip--current))
+        (let* ((default (car (member (buffer-name) names)))
+               (name (ido-completing-read "Evict from wip: " names nil t
+                                          nil nil default))
+               (buffer (get-buffer name)))
+          (if (null buffer)
+              (message "No such buffer: %s" name)
+            (wip--evict-buffer buffer wip--current)
+            (message "Evicted %s from wip %s"
+                     name (wip--wip-name wip--current))))))))
 
 ;;;; ibuffer integration
 
@@ -860,6 +867,57 @@ is current at that moment — stay in the wip until the window maps."
       (message "Launching %s for wip %s"
                (car wip-firefox-command) (wip--wip-name wip--current)))))
 
+;;;; Terminal integration
+
+(defvar-local wip--terminal-wip nil
+  "Wip that owns this terminal buffer, or nil outside `wip-terminal'.")
+
+(defun wip--terminal-buffer-name (wip)
+  "Return the terminal buffer name reserved for WIP."
+  (format "*wip terminal: %s*" (wip--wip-name wip)))
+
+(defun wip--terminal-buffer (wip)
+  "Return WIP's live terminal buffer, or nil."
+  (seq-find (lambda (buffer)
+              (and (eq (buffer-local-value 'wip--terminal-wip buffer) wip)
+                   (or (not (with-current-buffer buffer
+                              (derived-mode-p 'vterm-mode)))
+                       (process-live-p (get-buffer-process buffer)))))
+            (buffer-list)))
+
+(defun wip--terminal-directory ()
+  "Return a usable local directory for a new terminal."
+  (if (and (not (file-remote-p default-directory))
+           (file-directory-p default-directory))
+      default-directory
+    (file-name-as-directory (expand-file-name (or (getenv "HOME") "~")))))
+
+(defun wip-terminal ()
+  "Show the current wip's terminal, creating it if necessary.
+Uses vterm when it is installed; otherwise starts Eshell.  The buffer
+name is unique to the wip, so repeated calls return to the same
+terminal."
+  (interactive)
+  (wip--ensure-current)
+  (let* ((wip wip--current)
+         (buffer (wip--terminal-buffer wip)))
+    (if buffer
+        (display-buffer buffer)
+      (let ((name (generate-new-buffer-name (wip--terminal-buffer-name wip))))
+        (let ((default-directory (wip--terminal-directory)))
+          (setq buffer
+                (if (require 'vterm nil t)
+                    (progn
+                      (vterm name)
+                      (get-buffer name))
+                  (let ((eshell (eshell t)))
+                    (with-current-buffer eshell
+                      (rename-buffer name))
+                    eshell))))
+        (with-current-buffer buffer
+          (setq-local wip--terminal-wip wip))
+        (display-buffer buffer)))))
+
 ;;;; Keymaps and mode
 
 (defvar wip--session-map
@@ -881,6 +939,9 @@ the entry is installed when `wip-mode' is first enabled.")
     (define-key map (kbd "C-c w f") #'wip-firefox)
     map)
   "Keymap for `wip-mode'.")
+
+;; `wip-mode-map' survives reloads, so install new bindings outside its `defvar'.
+(define-key wip-mode-map (kbd "C-c w t") #'wip-terminal)
 
 ;;;###autoload
 (define-minor-mode wip-mode

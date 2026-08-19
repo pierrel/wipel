@@ -233,6 +233,16 @@ windows."
       ;; ...but no longer shown in any window.
       (should-not (get-buffer-window buffer)))))
 
+(ert-deftest wip-test-prefixed-kill-runs-normal-kill-buffer ()
+  "A prefix argument makes `wip-ido-kill-buffer' run `kill-buffer'."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (generate-new-buffer "wip-test-kill")))
+      (let ((read-buffer-function
+             (lambda (&rest _args) (buffer-name buffer))))
+        (wip-ido-kill-buffer '(4)))
+      (should-not (buffer-live-p buffer)))))
+
 (ert-deftest wip-test-evict-keeps-buffer-alive ()
   (wip-test--fixture
     (wip "alpha")
@@ -537,6 +547,79 @@ instead, and the substitute must not join the wip."
       (should (memq pad (wip--wip-buffers wip--current)))
       ;; Idempotent while the pad is live.
       (should (eq pad (wip--get-pad wip--current))))))
+
+(ert-deftest wip-test-terminal-falls-back-to-eshell ()
+  "A wip terminal uses its wip-specific name when vterm is unavailable."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((original-require (symbol-function 'require)))
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'vterm)
+                       nil
+                     (funcall original-require feature filename noerror)))))
+        (wip-terminal)))
+    (let ((buffer (get-buffer "*wip terminal: alpha*")))
+      (should buffer)
+      (with-current-buffer buffer
+        (should (derived-mode-p 'eshell-mode)))
+      (wip-terminal)
+      (should (eq buffer (get-buffer "*wip terminal: alpha*"))))))
+
+(ert-deftest wip-test-terminal-ignores-unrelated-name-collision ()
+  "A non-terminal buffer with the terminal name is not reused."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((collision (generate-new-buffer "*wip terminal: alpha*")))
+      (let ((original-require (symbol-function 'require)))
+        (cl-letf (((symbol-function 'require)
+                   (lambda (feature &optional filename noerror)
+                     (if (eq feature 'vterm)
+                         nil
+                       (funcall original-require feature filename noerror)))))
+          (wip-terminal)))
+      (should-not (eq collision (wip--terminal-buffer wip--current))))))
+
+(ert-deftest wip-test-terminal-ignores-dead-vterm ()
+  "A terminated vterm is recreated rather than redisplayed."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((buffer (generate-new-buffer "wip-test-dead-vterm"))
+          (wip wip--current))
+      (with-current-buffer buffer
+        (setq-local wip--terminal-wip wip)
+        (setq major-mode 'vterm-mode))
+      (should-not (wip--terminal-buffer wip)))))
+
+(ert-deftest wip-test-terminal-invalid-directory-falls-back-to-local-home ()
+  "A terminal never inherits an invalid or remote working directory."
+  (wip-test--fixture
+    (wip "alpha")
+    (let ((default-directory "/nonexistent-wip-test-directory/")
+          (original-require (symbol-function 'require)))
+      (cl-letf (((symbol-function 'require)
+                 (lambda (feature &optional filename noerror)
+                   (if (eq feature 'vterm)
+                       nil
+                     (funcall original-require feature filename noerror)))))
+        (wip-terminal)))
+    (with-current-buffer (wip--terminal-buffer wip--current)
+      (should (equal default-directory
+                     (file-name-as-directory
+                      (expand-file-name (or (getenv "HOME") "~"))))))))
+
+(ert-deftest wip-test-terminal-key-survives-reload ()
+  "Reloading wip.el installs the terminal binding in an existing keymap."
+  (let* ((key (kbd "C-c w t"))
+         (saved (lookup-key wip-mode-map key))
+         (source (expand-file-name "wip.el"
+                                   (file-name-directory (locate-library "wip")))))
+    (unwind-protect
+        (progn
+          (define-key wip-mode-map key nil)
+          (load source nil nil t)
+          (should (eq (lookup-key wip-mode-map key) #'wip-terminal)))
+      (define-key wip-mode-map key saved))))
 
 (ert-deftest wip-test-pad-persist-and-recover ()
   (wip-test--fixture
