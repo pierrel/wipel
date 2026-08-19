@@ -647,6 +647,50 @@ instead, and the substitute must not join the wip."
           (should (eq (lookup-key wip-mode-map key) #'wip-terminal)))
       (define-key wip-mode-map key saved))))
 
+(ert-deftest wip-test-tile-buffers-matches-substring-in-a-balanced-grid ()
+  "Tiling shows each matching buffer in an equally sized grid cell."
+  (wip-test--fixture
+    (let ((first (generate-new-buffer "wip-test-tile-one"))
+          (second (generate-new-buffer "wip-test-tile-two"))
+          (third (generate-new-buffer "wip-test-tile-three"))
+          (unmatched (generate-new-buffer "wip-test-unmatched")))
+      (wip-tile-buffers "tile")
+      (let ((windows (window-list nil 'never)))
+        (should (= (length windows) 4))
+        (dolist (buffer (list first second third))
+          (should (memq buffer (mapcar #'window-buffer windows))))
+        (should-not (memq unmatched (mapcar #'window-buffer windows)))
+        (should (apply #'= (mapcar #'window-total-width windows)))
+        (should (<= (- (apply #'max (mapcar #'window-total-height windows))
+                       (apply #'min (mapcar #'window-total-height windows)))
+                    1))))))
+
+(ert-deftest wip-test-tile-buffers-no-match-keeps-layout ()
+  "A failed tile request leaves the selected frame unchanged."
+  (wip-test--fixture
+    (let ((buffer (window-buffer)))
+      (should-error (wip-tile-buffers "wip-test-no-match") :type 'user-error)
+      (should (= (length (window-list nil 'never)) 1))
+      (should (eq (window-buffer) buffer)))))
+
+(ert-deftest wip-test-tile-buffers-quit-keeps-layout ()
+  "Quitting a tile request restores the previous layout."
+  (wip-test--fixture
+    (let ((right (generate-new-buffer "wip-test-tile-right")))
+      (set-window-buffer (split-window-right) right)
+      (let ((before (mapcar #'window-buffer (window-list nil 'never))))
+        (dolist (name '("wip-test-tile-one" "wip-test-tile-two"
+                        "wip-test-tile-three"))
+          (generate-new-buffer name))
+        (cl-letf (((symbol-function 'split-window-below)
+                   (lambda (&rest _) (signal 'quit nil))))
+          (should (eq (condition-case nil
+                          (progn (wip-tile-buffers "wip-test-tile") nil)
+                        (quit 'quit))
+                      'quit)))
+        (should (equal (mapcar #'window-buffer (window-list nil 'never))
+                       before))))))
+
 (ert-deftest wip-test-pad-persist-and-recover ()
   (wip-test--fixture
     (wip "alpha")

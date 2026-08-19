@@ -120,6 +120,8 @@ This is only available if your emacs can natively, like exwm.
 =C-c w f= calls =wip-firefox= and displays a wip-local firefox buffer. It either creates it or displays it if it already exists.
 ** Terminal
 =C-c w t= calls =wip-terminal= and displays a terminal named uniquely for the current wip. It creates a vterm when the vterm package is installed, or falls back to Eshell otherwise. It starts in the current local directory when valid, otherwise the local Emacs host's home directory. Repeating the command returns to the same terminal buffer for that wip.
+** Tile buffers
+=C-c w g= calls =wip-tile-buffers= and prompts for a literal, case-insensitive substring. It displays every live buffer whose name contains that substring, except its internal blank filler, in a balanced grid in the selected frame. Blank cells complete partial grids so the matching buffers remain the same size.
 ** Overview :future:
 =C-c w o= displays a buffer that contains all active wips, their tabs (if any) and a short representation of their content like so:
 #+begin_example

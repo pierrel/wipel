@@ -47,6 +47,7 @@
 ;;   C-c w p   `wip-pad'    show the wip scratchpad
 ;;   C-c w f   `wip-firefox'  show/launch a wip-local Firefox (EXWM)
 ;;   C-c w t   `wip-terminal' show a wip-local vterm or Eshell
+;;   C-c w g   `wip-tile-buffers' tile buffers matching a name substring
 ;;
 ;; Current limitations of this first pass:
 ;;
@@ -926,6 +927,59 @@ terminal."
           (setq-local wip--terminal-wip wip))
         (display-buffer buffer)))))
 
+;;;; Buffer tiling
+
+(defconst wip--tile-empty-buffer-name " *wip tile empty*"
+  "Name of the internal buffer used to complete a tile grid.")
+
+(defun wip--matching-buffers (substring)
+  "Return live buffers whose names contain SUBSTRING, ignoring case.
+The internal blank tile buffer is excluded."
+  (let ((case-fold-search t)
+        (pattern (regexp-quote substring)))
+    (seq-filter (lambda (buffer)
+                  (and (not (equal (buffer-name buffer)
+                                   wip--tile-empty-buffer-name))
+                       (string-match-p pattern (buffer-name buffer))))
+                (buffer-list))))
+
+(defun wip-tile-buffers (substring)
+  "Tile buffers whose names contain SUBSTRING in the selected frame.
+Matching is case-insensitive and literal.  Empty cells are filled
+with an internal blank buffer so every matching buffer gets the same
+size."
+  (interactive (list (read-string "Tile buffers matching: ")))
+  (let ((buffers (wip--matching-buffers substring)))
+    (unless buffers
+      (user-error "No buffer names contain %S" substring))
+    (let* ((count (length buffers))
+           (columns (ceiling (sqrt count)))
+           (rows (ceiling (/ (float count) columns)))
+           (empty (get-buffer-create wip--tile-empty-buffer-name))
+           (shown (append buffers
+                          (make-list (- (* rows columns) count) empty)))
+           (configuration (current-window-configuration)))
+      (condition-case err
+          (progn
+            (delete-other-windows)
+            (dotimes (_ (1- rows))
+              (split-window-below))
+            (dolist (window (window-list nil 'never))
+              (with-selected-window window
+                (dotimes (_ (1- columns))
+                  (split-window-right))))
+            (balance-windows)
+            (let ((windows (window-list nil 'never)))
+              (cl-mapc #'set-window-buffer windows shown)
+              (select-window (car windows))))
+        (quit
+         (set-window-configuration configuration)
+         (signal (car err) (cdr err)))
+        (error
+         (set-window-configuration configuration)
+         (user-error "Cannot tile %d buffers: %s"
+                     count (error-message-string err)))))))
+
 ;;;; Keymaps and mode
 
 (defvar wip--session-map
@@ -950,6 +1004,7 @@ the entry is installed when `wip-mode' is first enabled.")
 
 ;; `wip-mode-map' survives reloads, so install new bindings outside its `defvar'.
 (define-key wip-mode-map (kbd "C-c w t") #'wip-terminal)
+(define-key wip-mode-map (kbd "C-c w g") #'wip-tile-buffers)
 
 ;;;###autoload
 (define-minor-mode wip-mode
