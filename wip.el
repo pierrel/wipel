@@ -47,7 +47,7 @@
 ;;   C-c w p   `wip-pad'    show the wip scratchpad
 ;;   C-c w f   `wip-firefox'  show/launch a wip-local Firefox (EXWM)
 ;;   C-c w t   `wip-terminal' show a wip-local vterm or Eshell
-;;   C-c w g   `wip-tile-buffers' tile buffers matching a name substring
+;;   C-c w g   `wip-tile-buffers' tile matching buffers in the current wip
 ;;
 ;; Current limitations of this first pass:
 ;;
@@ -932,8 +932,8 @@ terminal."
 (defconst wip--tile-empty-buffer-name " *wip tile empty*"
   "Name of the internal buffer used to complete a tile grid.")
 
-(defun wip--matching-buffers (substring)
-  "Return live buffers whose names contain SUBSTRING, ignoring case.
+(defun wip--matching-buffers (substring wip)
+  "Return WIP's live buffers whose names contain SUBSTRING, ignoring case.
 The internal blank tile buffer is excluded."
   (let ((case-fold-search t)
         (pattern (regexp-quote substring)))
@@ -941,15 +941,16 @@ The internal blank tile buffer is excluded."
                   (and (not (equal (buffer-name buffer)
                                    wip--tile-empty-buffer-name))
                        (string-match-p pattern (buffer-name buffer))))
-                (buffer-list))))
+                (wip--live-buffers wip))))
 
 (defun wip-tile-buffers (substring)
-  "Tile buffers whose names contain SUBSTRING in the selected frame.
+  "Tile current wip buffers whose names contain SUBSTRING in the selected frame.
 Matching is case-insensitive and literal.  Empty cells are filled
 with an internal blank buffer so every matching buffer gets the same
 size."
   (interactive (list (read-string "Tile buffers matching: ")))
-  (let ((buffers (wip--matching-buffers substring)))
+  (wip--ensure-current)
+  (let ((buffers (wip--matching-buffers substring wip--current)))
     (unless buffers
       (user-error "No buffer names contain %S" substring))
     (let* ((count (length buffers))

@@ -650,24 +650,28 @@ instead, and the substitute must not join the wip."
 (ert-deftest wip-test-tile-buffers-matches-substring-in-a-balanced-grid ()
   "Tiling shows each matching buffer in an equally sized grid cell."
   (wip-test--fixture
-    (let ((first (generate-new-buffer "wip-test-tile-one"))
+    (let ((foreign (generate-new-buffer "wip-test-tile-foreign")))
+      (wip "alpha")
+      (let ((first (generate-new-buffer "wip-test-tile-one"))
           (second (generate-new-buffer "wip-test-tile-two"))
           (third (generate-new-buffer "wip-test-tile-three"))
           (unmatched (generate-new-buffer "wip-test-unmatched")))
-      (wip-tile-buffers "tile")
-      (let ((windows (window-list nil 'never)))
-        (should (= (length windows) 4))
-        (dolist (buffer (list first second third))
-          (should (memq buffer (mapcar #'window-buffer windows))))
-        (should-not (memq unmatched (mapcar #'window-buffer windows)))
-        (should (apply #'= (mapcar #'window-total-width windows)))
-        (should (<= (- (apply #'max (mapcar #'window-total-height windows))
-                       (apply #'min (mapcar #'window-total-height windows)))
-                    1))))))
+        (wip-tile-buffers "tile")
+        (let ((windows (window-list nil 'never)))
+          (should (= (length windows) 4))
+          (dolist (buffer (list first second third))
+            (should (memq buffer (mapcar #'window-buffer windows))))
+          (should-not (memq foreign (mapcar #'window-buffer windows)))
+          (should-not (memq unmatched (mapcar #'window-buffer windows)))
+          (should (apply #'= (mapcar #'window-total-width windows)))
+          (should (<= (- (apply #'max (mapcar #'window-total-height windows))
+                         (apply #'min (mapcar #'window-total-height windows)))
+                      1)))))))
 
 (ert-deftest wip-test-tile-buffers-no-match-keeps-layout ()
   "A failed tile request leaves the selected frame unchanged."
   (wip-test--fixture
+    (wip "alpha")
     (let ((buffer (window-buffer)))
       (should-error (wip-tile-buffers "wip-test-no-match") :type 'user-error)
       (should (= (length (window-list nil 'never)) 1))
@@ -676,6 +680,7 @@ instead, and the substitute must not join the wip."
 (ert-deftest wip-test-tile-buffers-quit-keeps-layout ()
   "Quitting a tile request restores the previous layout."
   (wip-test--fixture
+    (wip "alpha")
     (let ((right (generate-new-buffer "wip-test-tile-right")))
       (set-window-buffer (split-window-right) right)
       (let ((before (mapcar #'window-buffer (window-list nil 'never))))
