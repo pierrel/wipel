@@ -264,7 +264,15 @@ upgraded object."
                          (wip--upgrade-wip current))))
             (set-frame-parameter frame 'wip--current new)
             (when (eq frame wip--session-frame)
-              (setq wip--current new))))))))
+              (setq wip--current new))))))
+    ;; Terminal buffers refer to their owning record.  Preserve that
+    ;; ownership when a reload replaces a stale record.
+    (dolist (buffer (buffer-list))
+      (let ((replacement (assq (buffer-local-value 'wip--terminal-wip buffer)
+                               upgrades)))
+        (when replacement
+          (with-current-buffer buffer
+            (setq-local wip--terminal-wip (cdr replacement))))))))
 
 ;;;; Buffer bookkeeping
 
@@ -870,7 +878,7 @@ is current at that moment — stay in the wip until the window maps."
 ;;;; Terminal integration
 
 (defvar-local wip--terminal-wip nil
-  "Wip that owns this terminal buffer, or nil outside `wip-terminal'.")
+  "Wip record that owns this terminal buffer, or nil otherwise.")
 
 (defun wip--terminal-buffer-name (wip)
   "Return the terminal buffer name reserved for WIP."

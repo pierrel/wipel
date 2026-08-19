@@ -591,6 +591,32 @@ instead, and the substitute must not join the wip."
         (setq major-mode 'vterm-mode))
       (should-not (wip--terminal-buffer wip)))))
 
+(ert-deftest wip-test-terminal-survives-wip-upgrade ()
+  "A terminal remains associated with its wip after its record is replaced."
+  (wip-test--fixture
+    (wip "alpha")
+    (let* ((buffer (generate-new-buffer "wip-test-terminal-reload"))
+           ;; The original 7-slot layout, as would remain after reload.
+           (stale (record 'wip--wip "alpha" nil nil nil nil nil)))
+      (with-current-buffer buffer
+        (setq-local wip--terminal-wip stale))
+      (setcdr (assoc "alpha" wip--wips) stale)
+      (setq wip--current stale)
+      (wip--upgrade-wips)
+      (should (eq buffer (wip--terminal-buffer wip--current))))))
+
+(ert-deftest wip-test-terminal-does-not-survive-kill-and-recreate ()
+  "A terminal belongs to one wip lifetime, not just its name."
+  (wip-test--fixture
+    (let ((wip-kill-exclusive-buffers nil))
+      (wip "alpha")
+      (let ((buffer (generate-new-buffer "wip-test-old-terminal")))
+        (with-current-buffer buffer
+          (setq-local wip--terminal-wip wip--current))
+        (wip-kill "alpha")
+        (wip "alpha")
+        (should-not (eq buffer (wip--terminal-buffer wip--current)))))))
+
 (ert-deftest wip-test-terminal-invalid-directory-falls-back-to-local-home ()
   "A terminal never inherits an invalid or remote working directory."
   (wip-test--fixture
