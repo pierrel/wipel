@@ -476,7 +476,56 @@ instead, and the substitute must not join the wip."
     (wip "alpha")
     (wip "beta")
     (should (window-configuration-p
-             (wip--wip-window-config (wip-test--wip "alpha"))))))
+             (nth 1 (wip--frame-state (wip-test--wip "alpha")))))))
+
+(ert-deftest wip-test-frame-states-do-not-overwrite-one-another ()
+  "Each frame retains a distinct saved view for the same wip."
+  (wip-test--fixture
+    (let ((wip (wip--wip-create :name "alpha"))
+          (first-frame 'first-frame)
+          (second-frame 'second-frame)
+          (first-config 'first-config)
+          (second-config 'second-config)
+          (first-tabs 'first-tabs)
+          (second-tabs 'second-tabs))
+      (wip--set-frame-state wip first-frame first-config first-tabs)
+      (wip--set-frame-state wip second-frame second-config second-tabs)
+      (should (equal (wip--frame-state wip first-frame)
+                     (list first-frame first-config first-tabs)))
+      (should (equal (wip--frame-state wip second-frame)
+                     (list second-frame second-config second-tabs))))))
+
+(ert-deftest wip-test-reload-upgrades-frame-session ()
+  "Reload compatibility also repairs current wips saved in frame state."
+  (wip-test--fixture
+    (let* ((frame (selected-frame))
+           (saved (frame-parameter frame 'wip--current))
+           (stale (record 'wip--wip "legacy" nil nil nil nil nil)))
+      (unwind-protect
+          (progn
+            (push (cons "legacy" stale) wip--wips)
+            (set-frame-parameter frame 'wip--current stale)
+            (wip--upgrade-wips)
+            (should (wip--wip-compatible-p
+                     (frame-parameter frame 'wip--current))))
+        (set-frame-parameter frame 'wip--current saved)))))
+
+(ert-deftest wip-test-active-frame-session-keeps-fallback-filter ()
+  "Loading an active frame keeps its wip fallback-buffer predicate."
+  (wip-test--fixture
+    (let* ((frame (selected-frame))
+           (saved-current (frame-parameter frame 'wip--current))
+           (saved-skip (frame-parameter frame 'wip--saved-prev-buffer-skip))
+           (wip (wip--wip-create :name "alpha")))
+      (unwind-protect
+          (progn
+            (set-frame-parameter frame 'wip--current wip)
+            (set-frame-parameter frame 'wip--saved-prev-buffer-skip nil)
+            (wip--load-frame-session frame)
+            (should (eq switch-to-prev-buffer-skip
+                        #'wip--prev-buffer-skip-p)))
+        (set-frame-parameter frame 'wip--current saved-current)
+        (set-frame-parameter frame 'wip--saved-prev-buffer-skip saved-skip)))))
 
 (ert-deftest wip-test-pad-created-with-modes ()
   (wip-test--fixture

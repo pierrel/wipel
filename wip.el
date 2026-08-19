@@ -31,8 +31,9 @@
 ;;   without killing it globally.  Eviction is sticky: the buffer is
 ;;   not re-adopted just by being displayed again; bring it back
 ;;   with C-u C-x b.
-;; - The window configuration and the frame's tab-bar tabs are saved
-;;   when you switch away and restored when you come back.
+;; - Each frame keeps its own current wip, window configuration, and
+;;   tab-bar tabs.  A wip can therefore be used in several frames
+;;   without one frame replacing another's view.
 ;; - `wip-pad' gives you a per-wip scratchpad, persisted to a file
 ;;   under `wip-directory' for recovery.
 ;;
@@ -47,7 +48,6 @@
 ;;
 ;; Current limitations of this first pass:
 ;;
-;; - State is per selected frame; multi-frame use is untested.
 ;; - Winner-mode integration (per-wip `C-c <left>'/`C-c <right>')
 ;;   is not implemented yet.
 ;; - The overview and history features from the README are not
@@ -120,8 +120,7 @@ explicitly re-added."
   (buffers nil)
   (created nil)
   (evicted nil)
-  window-config
-  tabs
+  (frame-states nil)
   pad-buffer
   pad-name)
 
@@ -129,18 +128,18 @@ explicitly re-added."
   "Alist of (NAME . WIP) for all active wips, most recently used first.")
 
 (defvar wip--current nil
-  "The current wip (a `wip--wip' struct), or nil when not in a wip.
+  "The current `selected-frame' wip, or nil when it is not in a wip.
 Also used as the activation variable for `wip--session-map' in
 `minor-mode-map-alist'.")
 
 (defvar wip--global-window-config nil
-  "Window configuration saved when entering wip from the global context.")
+  "Selected-frame configuration saved when entering a wip from global context.")
 
 (defvar wip--global-tabs nil
-  "Frame `tabs' parameter saved when entering wip from the global context.")
+  "Selected frame's `tabs' parameter saved when entering a wip from global context.")
 
 (defvar wip--known-buffers (make-hash-table :test #'eq :weakness 'key)
-  "Set of buffers already seen, used to detect newly created buffers.")
+  "Selected frame's set of seen buffers, used to detect new buffers.")
 
 (defvar wip--inhibit-adoption nil
   "Non-nil while a wip transition or an eviction is running.
@@ -148,6 +147,68 @@ Suppresses display adoption in `wip--on-buffer-list-update' so that
 buffers momentarily on display during a transition are not pulled
 into the new wip, and so that a buffer being evicted is not
 re-adopted while windows still show it.")
+
+(defvar wip--saved-prev-buffer-skip nil
+  "Value of `switch-to-prev-buffer-skip' before wip took it over.
+Saved by `wip--activate' and restored by `wip--deactivate'.")
+
+(defvar wip--session-frame (selected-frame)
+  "Frame whose wip session is currently loaded into the variables above.")
+
+(defun wip--save-frame-session ()
+  "Save the loaded wip session in its frame parameters.
+`wip--sync-frame-session' calls this before loading the newly selected
+frame, keeping wip activation and global-context state independent
+between frames."
+  (when (frame-live-p wip--session-frame)
+    (set-frame-parameter wip--session-frame 'wip--current wip--current)
+    (set-frame-parameter wip--session-frame 'wip--global-window-config
+                         wip--global-window-config)
+    (set-frame-parameter wip--session-frame 'wip--global-tabs wip--global-tabs)
+    (set-frame-parameter wip--session-frame 'wip--known-buffers
+                         wip--known-buffers)
+    (set-frame-parameter wip--session-frame 'wip--saved-prev-buffer-skip
+                         wip--saved-prev-buffer-skip)))
+
+(defun wip--load-frame-session (frame)
+  "Load FRAME's wip session from its frame parameters.
+A frame without saved state starts outside a wip with its own buffer
+tracking table and its normal `switch-to-prev-buffer-skip' value."
+  (let* ((normal-prev-buffer-skip
+          (if wip--current
+              wip--saved-prev-buffer-skip
+            switch-to-prev-buffer-skip))
+         (saved-prev-buffer-skip
+          (if (assq 'wip--saved-prev-buffer-skip (frame-parameters frame))
+              (frame-parameter frame 'wip--saved-prev-buffer-skip)
+            normal-prev-buffer-skip)))
+    (setq wip--session-frame frame
+          wip--current (frame-parameter frame 'wip--current)
+          wip--global-window-config
+          (frame-parameter frame 'wip--global-window-config)
+          wip--global-tabs (frame-parameter frame 'wip--global-tabs)
+          wip--known-buffers
+          (or (frame-parameter frame 'wip--known-buffers)
+              (make-hash-table :test #'eq :weakness 'key))
+          wip--saved-prev-buffer-skip saved-prev-buffer-skip
+          switch-to-prev-buffer-skip
+          (if wip--current
+              #'wip--prev-buffer-skip-p
+            saved-prev-buffer-skip))))
+
+(defun wip--sync-frame-session ()
+  "Load the selected frame's wip session when it is not already loaded."
+  (unless (eq (selected-frame) wip--session-frame)
+    (wip--save-frame-session)
+    (wip--load-frame-session (selected-frame))))
+
+(defun wip--on-window-selection-change (frame)
+  "Swap sessions when FRAME becomes the `selected-frame' active window.
+This is the documented Emacs 28+ notification for frame selection as
+well as window selection; the current-frame check ignores unrelated
+redisplay notifications."
+  (when (eq frame (selected-frame))
+    (wip--sync-frame-session)))
 
 ;;;; Reload compatibility
 
@@ -166,7 +227,7 @@ changed struct definition.")
   "Return OBJECT, or a compatible replacement rebuilt from it.
 A record from an older wip.el layout keeps its name (slot 1) and
 live buffers (slot 2) — stable across all layouts so far; the rest
-of its state (window config, tabs, pad bookkeeping, eviction and
+of its state (per-frame view state, pad bookkeeping, eviction and
 ownership lists) is dropped and gets rebuilt lazily."
   (if (wip--wip-compatible-p object)
       object
@@ -179,14 +240,27 @@ ownership lists) is dropped and gets rebuilt lazily."
 (defun wip--upgrade-wips ()
   "Replace stale-layout wip records after a reload of wip.el.
 Walks `wip--wips', upgrading each record via `wip--upgrade-wip' and
-keeping `wip--current' pointing at the upgraded object."
-  (setq wip--wips
-        (mapcar (lambda (entry)
-                  (let ((new (wip--upgrade-wip (cdr entry))))
-                    (when (eq (cdr entry) wip--current)
-                      (setq wip--current new))
-                    (cons (car entry) new)))
-                wip--wips)))
+keeping the current-wip state in every frame pointing at the
+upgraded object."
+  (let (upgrades)
+    (setq wip--wips
+          (mapcar (lambda (entry)
+                    (let* ((old (cdr entry))
+                           (new (wip--upgrade-wip old)))
+                      (push (cons old new) upgrades)
+                      (when (eq old wip--current)
+                        (setq wip--current new))
+                      (cons (car entry) new)))
+                  wip--wips))
+    (dolist (frame (frame-list))
+      (let ((current (frame-parameter frame 'wip--current)))
+        (when (and current (not (wip--wip-compatible-p current)))
+          (let ((new (or (cdr (assq current upgrades))
+                         (cdr (assoc (wip--wip-name current) wip--wips))
+                         (wip--upgrade-wip current))))
+            (set-frame-parameter frame 'wip--current new)
+            (when (eq frame wip--session-frame)
+              (setq wip--current new))))))))
 
 ;;;; Buffer bookkeeping
 
@@ -260,7 +334,8 @@ Buffers that were never selected come last, in creation order."
 
 (defun wip--on-buffer-list-update ()
   "Track buffers for the current wip.
-Installed on `buffer-list-update-hook' only while a wip is current.
+Installed on `buffer-list-update-hook' while `wip-mode' is enabled;
+does nothing in frames without a current wip.
 Membership is deliberately generic — one rule, no per-command cases:
 any trackable buffer (name not starting with a space) that is
 CREATED while the wip is current joins the wip and is owned by it,
@@ -272,6 +347,7 @@ fallback).  The only exceptions: the wip's evicted buffers (see
 wip transitions and evictions (see `wip--inhibit-adoption').
 Buffers created with buffer hooks inhibited are picked up on the
 next run."
+  (wip--sync-frame-session)
   (when wip--current
     (unless (wip--wip-compatible-p wip--current)
       (wip--upgrade-wips))
@@ -288,10 +364,6 @@ next run."
                      (not (memq buffer
                                 (wip--wip-evicted wip--current))))
             (wip--add-buffer buffer wip--current)))))))
-
-(defvar wip--saved-prev-buffer-skip nil
-  "Value of `switch-to-prev-buffer-skip' before wip took it over.
-Saved by `wip--activate' and restored by `wip--deactivate'.")
 
 (defun wip--prev-buffer-skip-p (_window buffer _bury-or-kill)
   "Return non-nil to skip BUFFER as a window fallback while in a wip.
@@ -310,6 +382,7 @@ adopt)."
 (defun wip--ensure-current ()
   "Signal a `user-error' unless a wip is current.
 Also upgrades stale wip records left behind by a reload of wip.el."
+  (wip--sync-frame-session)
   (unless wip--current
     (user-error "Not in a wip (use `wip' / C-c w m to enter one)"))
   (unless (wip--wip-compatible-p wip--current)
@@ -325,20 +398,17 @@ must name an active wip."
     (ido-completing-read prompt names nil (not allow-new))))
 
 (defun wip--activate ()
-  "Install the hooks that make the wip machinery live.
-Also takes over `switch-to-prev-buffer-skip' (a user customization
-of that variable is shelved while in a wip and restored on exit)."
+  "Activate wip behavior in the selected frame.
+Takes over this frame's `switch-to-prev-buffer-skip'; its prior value
+is restored on exit.  The tracking hook is global, so it is only
+removed when `wip-mode' is disabled."
   (add-hook 'buffer-list-update-hook #'wip--on-buffer-list-update)
-  (add-hook 'kill-emacs-hook #'wip--persist-all-pads)
   (setq wip--saved-prev-buffer-skip switch-to-prev-buffer-skip
         switch-to-prev-buffer-skip #'wip--prev-buffer-skip-p))
 
 (defun wip--deactivate ()
-  "Remove the buffer-tracking hook installed by `wip--activate'.
-Also restores `switch-to-prev-buffer-skip'.  The `kill-emacs-hook'
-entry stays so scratchpads of inactive wips are still persisted on
-exit."
-  (remove-hook 'buffer-list-update-hook #'wip--on-buffer-list-update)
+  "Deactivate wip behavior in the selected frame.
+Restores that frame's `switch-to-prev-buffer-skip' value."
   (setq switch-to-prev-buffer-skip wip--saved-prev-buffer-skip))
 
 (defun wip--restorable-config-p (config)
@@ -348,23 +418,41 @@ A configuration whose frame has been deleted passes
   (and (window-configuration-p config)
        (frame-live-p (window-configuration-frame config))))
 
+(defun wip--set-frame-state (wip frame window-config tabs)
+  "Save FRAME's WINDOW-CONFIG and TABS into WIP.
+Each entry is keyed by its frame so working in another frame cannot
+replace this frame's saved view."
+  (setf (wip--wip-frame-states wip)
+        (cons (list frame window-config tabs)
+              (assq-delete-all frame (wip--wip-frame-states wip)))))
+
+(defun wip--frame-state (wip &optional frame)
+  "Return WIP's saved view state for FRAME, or nil.
+FRAME defaults to the `selected-frame'.  The returned list holds the
+frame, window configuration, and tabs in that order."
+  (assq (or frame (selected-frame)) (wip--wip-frame-states wip)))
+
 (defun wip--save-state (wip)
-  "Save the frame's window configuration and tabs into WIP.
+  "Save the selected frame's window configuration and tabs into WIP.
 Also persists WIP's scratchpad to disk; persistence errors are
 demoted to messages so state transitions always complete."
-  (setf (wip--wip-window-config wip) (current-window-configuration)
-        (wip--wip-tabs wip) (frame-parameter nil 'tabs))
+  (wip--set-frame-state wip (selected-frame)
+                        (current-window-configuration)
+                        (frame-parameter nil 'tabs))
   (wip--persist-pad wip))
 
 (defun wip--restore-state (wip)
-  "Restore WIP's window configuration and tabs in the selected frame.
+  "Restore WIP's `selected-frame' window configuration and tabs.
 A wip that was never displayed before, or whose saved configuration
 belongs to a deleted frame, gets a fresh single window showing its
 scratchpad."
-  (set-frame-parameter nil 'tabs (wip--wip-tabs wip))
-  (if (wip--restorable-config-p (wip--wip-window-config wip))
+  (let* ((state (wip--frame-state wip))
+         (window-config (nth 1 state))
+         (tabs (nth 2 state)))
+    (set-frame-parameter nil 'tabs tabs)
+    (if (wip--restorable-config-p window-config)
       (progn
-        (set-window-configuration (wip--wip-window-config wip))
+        (set-window-configuration window-config)
         ;; If the saved selected window's buffer died meanwhile,
         ;; Emacs substitutes a buffer of its own choosing; switch to
         ;; a wip buffer instead so the substitute is not adopted.
@@ -373,8 +461,8 @@ scratchpad."
           (switch-to-prev-buffer)
           (unless (memq (window-buffer) (wip--live-buffers wip))
             (switch-to-buffer (wip--get-pad wip)))))
-    (delete-other-windows)
-    (switch-to-buffer (wip--get-pad wip)))
+      (delete-other-windows)
+      (switch-to-buffer (wip--get-pad wip))))
   (force-mode-line-update t))
 
 (defun wip--save-global-state ()
@@ -412,6 +500,7 @@ scratchpad."
 Interactively, complete over the active wips; typing a new name
 creates a fresh wip."
   (interactive (list (wip--read-wip-name "wip: " t)))
+  (wip--sync-frame-session)
   (when (string-blank-p name)
     (user-error "A wip needs a name"))
   (wip--upgrade-wips)
@@ -432,7 +521,22 @@ The wip itself stays active and can be re-entered with `wip'."
     (setq wip--current nil)
     (wip--deactivate)
     (wip--restore-global-state)
+    (wip--save-frame-session)
     (message "Left wip %s" name)))
+
+(defun wip--leave-wip-everywhere (wip)
+  "Leave WIP and restore global context in every frame using it.
+This is used before killing WIP, so another frame cannot retain a
+current wip record that has been removed from `wip--wips'."
+  (dolist (frame (frame-list))
+    (with-selected-frame frame
+      (wip--sync-frame-session)
+      (when (eq wip wip--current)
+        (wip--save-state wip)
+        (setq wip--current nil)
+        (wip--deactivate)
+        (wip--restore-global-state)
+        (wip--save-frame-session)))))
 
 (defun wip-kill (name)
   "Kill the wip called NAME.
@@ -446,7 +550,8 @@ killed globally; buffers adopted from outside are left alive.  Like
 buffers without asking —
 including a pad that was renamed away earlier and never saved to a
 file; save promoted content if it must survive a wip kill.  If NAME
-is the current wip, the global context is restored."
+is current in any frame, the global context is restored in each of
+those frames."
   (interactive (list (wip--read-wip-name "Kill wip: ")))
   (wip--upgrade-wips)
   (let* ((entry (assoc name wip--wips))
@@ -454,10 +559,7 @@ is the current wip, the global context is restored."
     (unless wip
       (user-error "No wip named %s" name))
     (wip--persist-pad-final wip)
-    (when (eq wip wip--current)
-      (setq wip--current nil)
-      (wip--deactivate)
-      (wip--restore-global-state))
+    (wip--leave-wip-everywhere wip)
     (setq wip--wips (delq entry wip--wips))
     (when wip-kill-exclusive-buffers
       (dolist (buffer (wip--live-buffers wip))
@@ -784,17 +886,31 @@ the entry is installed when `wip-mode' is first enabled.")
 (define-minor-mode wip-mode
   "Global minor mode providing the `C-c w' wip commands.
 Entering a wip with `wip' enables this mode automatically.  Disabling
-it exits the current wip (active wips are kept)."
+it exits wips in every frame (active wips are kept)."
   :global t
   :keymap wip-mode-map
   :lighter (:eval (if wip--current
                       (format " wip[%s]" (wip--wip-name wip--current))
                     " wip"))
   (if wip-mode
-      (add-to-list 'minor-mode-map-alist
-                   (cons 'wip--current wip--session-map))
-    (when wip--current
-      (wip-exit))))
+      (progn
+        (wip--sync-frame-session)
+        (add-hook 'buffer-list-update-hook #'wip--on-buffer-list-update)
+        (add-hook 'window-selection-change-functions
+                  #'wip--on-window-selection-change)
+        (add-hook 'kill-emacs-hook #'wip--persist-all-pads)
+        (add-to-list 'minor-mode-map-alist
+                     (cons 'wip--current wip--session-map)))
+    (dolist (frame (frame-list))
+      (with-selected-frame frame
+        (wip--sync-frame-session)
+        (when wip--current
+          (wip-exit))))
+    (remove-hook 'buffer-list-update-hook #'wip--on-buffer-list-update)
+    (remove-hook 'window-selection-change-functions
+                 #'wip--on-window-selection-change)
+    (setq minor-mode-map-alist
+          (assq-delete-all 'wip--current minor-mode-map-alist))))
 
 (provide 'wip)
 
