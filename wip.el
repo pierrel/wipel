@@ -153,6 +153,9 @@ buffers momentarily on display during a transition are not pulled
 into the new wip, and so that a buffer being evicted is not
 re-adopted while windows still show it.")
 
+(defvar-local wip--terminal-wip nil
+  "Wip record that owns this terminal buffer, or nil otherwise.")
+
 (defvar wip--saved-prev-buffer-skip nil
   "Value of `switch-to-prev-buffer-skip' before wip took it over.
 Saved by `wip--activate' and restored by `wip--deactivate'.")
@@ -886,9 +889,6 @@ is current at that moment — stay in the wip until the window maps."
                (car wip-firefox-command) (wip--wip-name wip--current)))))
 
 ;;;; Terminal integration
-
-(defvar-local wip--terminal-wip nil
-  "Wip record that owns this terminal buffer, or nil otherwise.")
 
 (defun wip--terminal-buffer-name (wip)
   "Return the terminal buffer name reserved for WIP."

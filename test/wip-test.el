@@ -615,6 +615,18 @@ instead, and the substitute must not join the wip."
       (wip--upgrade-wips)
       (should (eq buffer (wip--terminal-buffer wip--current))))))
 
+(ert-deftest wip-test-terminal-owner-is-declared-before-upgrades ()
+  "Reloads declare terminal ownership before upgrade code can use it."
+  (let* ((source (expand-file-name "wip.el"
+                                   (file-name-directory (locate-library "wip"))))
+         (contents (with-temp-buffer
+                     (insert-file-contents source)
+                     (buffer-string))))
+    (should (< (string-match-p (regexp-quote "(defvar-local wip--terminal-wip")
+                               contents)
+               (string-match-p (regexp-quote "(defun wip--upgrade-wips")
+                               contents)))))
+
 (ert-deftest wip-test-terminal-does-not-survive-kill-and-recreate ()
   "A terminal belongs to one wip lifetime, not just its name."
   (wip-test--fixture
